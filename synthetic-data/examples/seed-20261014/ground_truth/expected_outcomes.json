@@ -1,0 +1,118 @@
+{
+  "data_classification": "SYNTHETIC_GROUND_TRUTH_NOT_OPERATIONAL_EVIDENCE",
+  "scenarios": {
+    "cross_domain_inconsistency": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_547b1d1541275f33a3ba374a_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_547b1d1541275f33a3ba374a_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_547b1d1541275f33a3ba374a_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": "CROSS_DOMAIN_INCONSISTENCY",
+      "expected_investigation_disposition": "AMBIGUOUS",
+      "expected_recovery_status": null,
+      "expected_trust_band": "LOW",
+      "rationale": "Related domain metrics disagree; the fixture does not establish which source is authoritative.",
+      "scenario_instance_id": "case_547b1d1541275f33a3ba374a",
+      "scenario_type": "cross_domain_inconsistency"
+    },
+    "healthy_baseline": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_6b88ae524aee47b32085db7f_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_6b88ae524aee47b32085db7f_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_6b88ae524aee47b32085db7f_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": null,
+      "expected_investigation_disposition": "HEALTHY_NO_ACTION",
+      "expected_recovery_status": null,
+      "expected_trust_band": "HIGH",
+      "rationale": "Healthy fixture is already valid; no recovery action or verification run is expected.",
+      "scenario_instance_id": "case_6b88ae524aee47b32085db7f",
+      "scenario_type": "healthy"
+    },
+    "incomplete_data": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_aff534fe164d6b7872b6ed70_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_aff534fe164d6b7872b6ed70_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_aff534fe164d6b7872b6ed70_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": "INCOMPLETE_DATA",
+      "expected_investigation_disposition": "ACTIONABLE_CANDIDATE",
+      "expected_recovery_status": null,
+      "expected_trust_band": "LOW",
+      "rationale": "Observed completeness is below the fixture threshold. No recovery verification is generated.",
+      "scenario_instance_id": "case_aff534fe164d6b7872b6ed70",
+      "scenario_type": "incomplete_data"
+    },
+    "inconclusive": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_1df5e590b8fd863ef1b06ec5_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_1df5e590b8fd863ef1b06ec5_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_1df5e590b8fd863ef1b06ec5_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": null,
+      "expected_investigation_disposition": "INCONCLUSIVE",
+      "expected_recovery_status": null,
+      "expected_trust_band": "UNKNOWN",
+      "rationale": "Contradictory freshness and completeness signals do not establish a cause.",
+      "scenario_instance_id": "case_1df5e590b8fd863ef1b06ec5",
+      "scenario_type": "inconclusive"
+    },
+    "metric_anomaly": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_852d39255ebca83b25575f54_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_852d39255ebca83b25575f54_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_852d39255ebca83b25575f54_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": "METRIC_ANOMALY",
+      "expected_investigation_disposition": "AMBIGUOUS",
+      "expected_recovery_status": null,
+      "expected_trust_band": "MEDIUM",
+      "rationale": "A metric deviation is observed; a causal explanation is not established by this evidence.",
+      "scenario_instance_id": "case_852d39255ebca83b25575f54",
+      "scenario_type": "anomaly"
+    },
+    "pipeline_failure": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_d060d9e0b4c62478fa63ea47_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_d060d9e0b4c62478fa63ea47_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_d060d9e0b4c62478fa63ea47_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": "UPSTREAM_PIPELINE_FAILURE",
+      "expected_investigation_disposition": "ACTIONABLE_CANDIDATE",
+      "expected_recovery_status": null,
+      "expected_trust_band": "LOW",
+      "rationale": "The fixture has a failed upstream run. Module 1 does not execute recovery or verification.",
+      "scenario_instance_id": "case_d060d9e0b4c62478fa63ea47",
+      "scenario_type": "pipeline_failure"
+    },
+    "recurring_incident": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_2c6d28ecbbfcfc38dc0569f4_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_2c6d28ecbbfcfc38dc0569f4_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_2c6d28ecbbfcfc38dc0569f4_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": "RECURRING_PATTERN",
+      "expected_investigation_disposition": "AMBIGUOUS",
+      "expected_recovery_status": null,
+      "expected_trust_band": "MEDIUM",
+      "rationale": "Synthetic history is similar, but similarity alone does not prove the present cause.",
+      "scenario_instance_id": "case_2c6d28ecbbfcfc38dc0569f4",
+      "scenario_type": "recurring_incident"
+    },
+    "stale_data": {
+      "evidence_run_ids": [
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_37c8a2a10dd59d2afd8a75a5_pl_orders_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_37c8a2a10dd59d2afd8a75a5_pl_finance_ingest",
+        "run_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_37c8a2a10dd59d2afd8a75a5_pl_warehouse_refresh"
+      ],
+      "expected_cause_category": "STALE_DATA",
+      "expected_investigation_disposition": "ACTIONABLE_CANDIDATE",
+      "expected_recovery_status": null,
+      "expected_trust_band": "LOW",
+      "rationale": "Observed freshness lag exceeds the fixture threshold. No recovery verification is generated.",
+      "scenario_instance_id": "case_37c8a2a10dd59d2afd8a75a5",
+      "scenario_type": "stale_data"
+    }
+  },
+  "schema_version": "2.0.0"
+}

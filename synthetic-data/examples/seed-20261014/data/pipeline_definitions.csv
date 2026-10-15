@@ -1,0 +1,4 @@
+pipeline_id,pipeline_name,source_id,schema_version
+pl_orders_ingest,Orders ingestion,src_synthetic_erp,2.0.0
+pl_finance_ingest,Finance ingestion,src_synthetic_ledger,2.0.0
+pl_warehouse_refresh,Warehouse refresh,src_synthetic_warehouse,2.0.0
