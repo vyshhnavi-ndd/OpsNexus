@@ -3,6 +3,8 @@
 from pathlib import Path
 import unittest
 
+from infra.exasol.tests.evaluate_intelligence import CAUSE_TO_FINDING, FINDINGS_SQL, evaluate_results
+
 
 ROOT = Path(__file__).resolve().parents[3]
 SQL = (ROOT / "infra" / "exasol" / "sql" / "03_create_intel_findings.sql").read_text(
@@ -30,8 +32,10 @@ class IntelligenceContractTests(unittest.TestCase):
         for finding_type in (
             "PIPELINE_FAILURE",
             "STALE_DATASET",
+            "INCOMPLETE_DATA",
             "QUALITY_FAILURE",
             "KPI_ANOMALY",
+            "CROSS_DOMAIN_INCONSISTENCY",
             "INCIDENT_RECURRENCE",
         ):
             self.assertIn(finding_type, SQL)
@@ -41,6 +45,47 @@ class IntelligenceContractTests(unittest.TestCase):
         self.assertIn("OPS_STAGE.STG_INCIDENT_HISTORY", SQL)
         self.assertNotIn("EXPECTED_OUTCOMES", SQL.upper())
         self.assertNotIn("GROUND_TRUTH", SQL.upper())
+
+    def test_extended_evidence_columns_and_safe_threshold_handling_exist(self) -> None:
+        for column in ("SOURCE_REFERENCES", "MEASURED_VALUE", "EXPECTED_VALUE", "THRESHOLD_VALUE"):
+            self.assertIn(column, SQL)
+        self.assertIn("NULLIF(ABS(k.BASELINE_VALUE), 0)", SQL)
+        self.assertIn("o.EXPECTED_ROW_COUNT > 0", SQL)
+        self.assertIn("p.RELATIVE_GAP > 0.10", SQL)
+        self.assertIn("COUNT(DISTINCT i.INCIDENT_ID) >= 2", SQL)
+
+    def test_evaluator_maps_findings_without_using_live_sql_as_ground_truth(self) -> None:
+        self.assertEqual(
+            CAUSE_TO_FINDING["CROSS_DOMAIN_INCONSISTENCY"],
+            "CROSS_DOMAIN_INCONSISTENCY",
+        )
+        self.assertIn("OPS_INTEL.V_FINDINGS", FINDINGS_SQL)
+
+    def test_evaluator_excludes_inconclusive_and_unlabeled_scenarios_from_metrics(self) -> None:
+        from json import loads
+
+        truth_path = ROOT / "synthetic-data" / "examples" / "seed-20261014" / "ground_truth" / "expected_outcomes.json"
+        truth = loads(truth_path.read_text(encoding="utf-8"))
+        findings = []
+        for scenario in truth["scenarios"].values():
+            cause = scenario.get("expected_cause_category")
+            target = CAUSE_TO_FINDING.get(cause)
+            if target:
+                findings.append({
+                    "SCENARIO_INSTANCE_ID": scenario["scenario_instance_id"],
+                    "FINDING_TYPE": target,
+                })
+        findings.append({
+            "SCENARIO_INSTANCE_ID": truth["scenarios"]["inconclusive"]["scenario_instance_id"],
+            "FINDING_TYPE": "STALE_DATASET",
+        })
+
+        result = evaluate_results(findings, truth)
+        self.assertEqual(result["rule_metrics"]["PIPELINE_FAILURE"]["tp"], 1)
+        self.assertEqual(result["rule_metrics"]["PIPELINE_FAILURE"]["fp"], 0)
+        self.assertEqual(result["rule_metrics"]["PIPELINE_FAILURE"]["fn"], 0)
+        inconclusive = next(row for row in result["scenarios"] if row["scenario"] == "inconclusive")
+        self.assertEqual(inconclusive["status"], "UNLABELED_INCONCLUSIVE")
 
 
 if __name__ == "__main__":
