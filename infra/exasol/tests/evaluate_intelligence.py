@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
-import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -18,6 +15,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 DEFAULT_GROUND_TRUTH = (
     ROOT / "synthetic-data" / "examples" / "seed-20261014" / "ground_truth" / "expected_outcomes.json"
 )
@@ -106,26 +105,26 @@ def evaluate_results(findings: list[dict[str, Any]], truth: dict[str, Any]) -> d
     return {"scenarios": scenarios, "rule_metrics": metrics}
 
 
-def _query_live_view(launcher: str, deployment_dir: Path) -> list[dict[str, Any]]:
-    result = subprocess.run(
-        [launcher, "connect", "--json", "-c", FINDINGS_SQL],
-        cwd=deployment_dir,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Exasol query failed")
-    payload = json.loads(result.stdout)
-    statement = next(
-        (item for item in payload.get("statements", []) if item.get("statementType") == "SELECT"),
-        None,
-    )
-    if statement is None:
-        raise RuntimeError("Exasol launcher returned no SELECT result for V_FINDINGS")
-    columns = statement["columns"]
-    findings = [dict(zip(columns, row)) for row in statement["rows"]]
+def _query_live_view() -> list[dict[str, Any]]:
+    """Read the live findings view through the configured read-only API identity."""
+    from api.app import _connect_from_environment
+
+    connection = None
+    try:
+        connection = _connect_from_environment()
+        rows = connection.execute(FINDINGS_SQL).fetchall()
+        findings = [
+            {str(key).upper(): value for key, value in row.items()}
+            for row in rows
+        ]
+    except Exception:
+        raise RuntimeError("Read-only Exasol findings query failed") from None
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
     identifiers = [str(finding["FINDING_ID"]) for finding in findings]
     if len(identifiers) != len(set(identifiers)):
         raise RuntimeError("OPS_INTEL.V_FINDINGS returned duplicate FINDING_ID values")
@@ -134,29 +133,16 @@ def _query_live_view(launcher: str, deployment_dir: Path) -> list[dict[str, Any]
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--launcher",
-        default=os.environ.get("EXASOL_LAUNCHER") or shutil.which("exasol"),
-        help="path to the Exasol Launcher executable (or set EXASOL_LAUNCHER)",
-    )
-    parser.add_argument(
-        "--deployment-dir",
-        type=Path,
-        default=Path(os.environ.get("USERPROFILE", str(Path.home())))
-        / ".exasol" / "personal" / "deployments" / "default",
-    )
     parser.add_argument("--ground-truth", type=Path, default=DEFAULT_GROUND_TRUTH)
     parser.add_argument("--repeats", type=int, default=2, help="number of live-view reads to compare for stability")
     args = parser.parse_args(argv)
-    if not args.launcher:
-        parser.error("provide --launcher or set EXASOL_LAUNCHER")
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
 
     truth = json.loads(args.ground_truth.read_text(encoding="utf-8"))
-    findings = _query_live_view(args.launcher, args.deployment_dir)
+    findings = _query_live_view()
     for _ in range(args.repeats - 1):
-        repeated = _query_live_view(args.launcher, args.deployment_dir)
+        repeated = _query_live_view()
         if repeated != findings:
             raise RuntimeError("OPS_INTEL.V_FINDINGS changed between repeated reads")
     result = evaluate_results(findings, truth)

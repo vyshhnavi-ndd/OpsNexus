@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import ssl
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +28,7 @@ SEVERITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 MAX_PAGE_SIZE = 100
 _SCENARIO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 _FINDING_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:|=-]{0,399}$")
+_STARTED_AT_EVIDENCE_RE = re.compile(r"(?P<prefix>(?:^|;\s*)started_at=)(?P<value>[^;]+)")
 
 
 class DatabaseUnavailable(Exception):
@@ -82,8 +83,46 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _normalize_pipeline_failure_timestamp(evidence: Any) -> Any:
+    """Render the contractually UTC STARTED_AT evidence with one Z suffix.
+
+    STARTED_AT is a timezone-naive Exasol TIMESTAMP, but the staging contract
+    defines it as UTC. Explicit offsets are converted to UTC; unparseable values
+    are preserved rather than being labeled UTC.
+    """
+    if not isinstance(evidence, str):
+        return evidence
+
+    def normalize(match: re.Match[str]) -> str:
+        value = match.group("value")
+        raw = value.strip()
+        if "T" not in raw and " " not in raw:
+            return match.group(0)
+        try:
+            if raw.endswith(("Z", "z")):
+                parsed = datetime.fromisoformat(raw[:-1] + "+00:00")
+            else:
+                parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return match.group(0)
+
+        if parsed.tzinfo is None:
+            # This field is specifically sourced from OPS_STAGE.STG_PIPELINE_RUNS.STARTED_AT,
+            # whose project data contract defines naive values as UTC.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+        padding = value[: len(value) - len(value.lstrip())]
+        trailing = value[len(value.rstrip()):]
+        return f"{match.group('prefix')}{padding}{parsed.isoformat().replace('+00:00', 'Z')}{trailing}"
+
+    return _STARTED_AT_EVIDENCE_RE.sub(normalize, evidence, count=1)
+
+
 def _finding(row: dict[str, Any]) -> dict[str, Any]:
     normalized = {str(key).upper(): value for key, value in row.items()}
+    evidence = normalized.get("EVIDENCE")
+    if str(normalized.get("FINDING_TYPE", "")).upper() == "PIPELINE_FAILURE":
+        evidence = _normalize_pipeline_failure_timestamp(evidence)
     return {
         "finding_id": _json_value(normalized.get("FINDING_ID")),
         "finding_type": _json_value(normalized.get("FINDING_TYPE")),
@@ -92,7 +131,7 @@ def _finding(row: dict[str, Any]) -> dict[str, Any]:
             "type": _json_value(normalized.get("AFFECTED_ENTITY_TYPE")),
             "id": _json_value(normalized.get("AFFECTED_ENTITY_ID")),
         },
-        "evidence": _json_value(normalized.get("EVIDENCE")),
+        "evidence": _json_value(evidence),
         "recommended_action": _json_value(normalized.get("RECOMMENDED_ACTION")),
         "source_references": _json_value(normalized.get("SOURCE_REFERENCES")),
         "measured_value": _json_value(normalized.get("MEASURED_VALUE")),

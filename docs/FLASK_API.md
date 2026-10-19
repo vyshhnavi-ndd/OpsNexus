@@ -30,11 +30,85 @@ Do not replace the comment with a literal password command. The application neve
 
 ## Endpoints
 
+The exact dashboard contract, nullable fields, examples, and error schemas are detailed in the `Dashboard integration contract` section below.
+
 - `GET /health` checks API availability and executes `SELECT 1`; returns `200` when Exasol is reachable or structured `503` when it is not.
 - `GET /api/findings?page=1&page_size=50&finding_type=KPI_ANOMALY&severity=HIGH&scenario_instance_id=...` lists findings. All filters are optional. Page size is restricted to 1–100. Results are ordered by stable finding ID and include pagination totals.
 - `GET /api/findings/<finding_id>` returns one finding or structured `404`.
 
 Finding objects expose `finding_id`, `finding_type`, `severity`, `affected_entity` (`type` and `id`), `evidence`, `recommended_action`, `source_references`, `measured_value`, `expected_value`, `threshold`, `source_run_id`, and `scenario_instance_id`. Nullable source fields are returned as JSON `null`.
+
+For `PIPELINE_FAILURE`, the API temporarily normalizes the `started_at` value inside evidence to a single UTC `Z` suffix. `OPS_STAGE.STG_PIPELINE_RUNS.STARTED_AT` is a timezone-naive Exasol `TIMESTAMP`, while the project schema and generator define it as UTC. Explicit offsets are converted to UTC; already-UTC values remain single-suffixed, and unparseable/local labels are preserved unchanged. This is an API compatibility fix only: the Exasol view definition has not been updated in the live database. The SQL-side correction remains pending deployment through an authorized non-SYS account.
+
+## Dashboard integration contract
+
+All routes return JSON. There is no built-in user authentication; keep Flask bound to loopback or place it behind an approved authenticated gateway. For a browser dashboard on another development port, use the frontend dev-server proxy or a same-origin reverse proxy. Do not expose the unauthenticated Flask development server to a network.
+
+### `GET /health`
+
+Runs `SELECT 1` through the configured Exasol identity.
+
+```json
+{"status":"ok","database":"connected"}
+```
+
+Returns `200` when the query succeeds and `503` with `database_unavailable` when the database connection or query fails.
+
+### `GET /api/findings`
+
+Optional query parameters:
+
+| Parameter | Type | Default | Allowed values / behavior |
+|---|---|---:|---|
+| `page` | positive integer | `1` | One-based page number. |
+| `page_size` | integer | `50` | `1` through `100`. |
+| `finding_type` | string | omitted | `PIPELINE_FAILURE`, `STALE_DATASET`, `INCOMPLETE_DATA`, `QUALITY_FAILURE`, `KPI_ANOMALY`, `CROSS_DOMAIN_INCONSISTENCY`, or `INCIDENT_RECURRENCE`; case-insensitive. |
+| `severity` | string | omitted | `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`; case-insensitive. |
+| `scenario_instance_id` | string | omitted | Opaque token matching `[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}`. |
+
+Results are ordered by `finding_id`. A page beyond the result set returns an empty `data` array while preserving totals.
+
+```json
+{
+  "data": [{
+    "finding_id": "kpi_anomaly:kpi_demo_001",
+    "finding_type": "KPI_ANOMALY",
+    "severity": "MEDIUM",
+    "affected_entity": {"type": "KPI", "id": "kpi_demo_001"},
+    "evidence": "kpi_id=kpi_demo_001; measured_relative_deviation=0.5",
+    "recommended_action": "Validate the metric definition and its source observation.",
+    "source_references": "kpi_id=kpi_demo_001; observation_id=obs_demo_001; quality_result_id=qr_demo_001",
+    "measured_value": "0.5",
+    "expected_value": "0.2",
+    "threshold": "0.2",
+    "source_run_id": "run_demo_001",
+    "scenario_instance_id": "case_demo_001"
+  }],
+  "pagination": {"page": 1, "page_size": 50, "total_count": 1, "total_pages": 1}
+}
+```
+
+The view contract has 13 database columns. The JSON object has 12 top-level keys because `AFFECTED_ENTITY_TYPE` and `AFFECTED_ENTITY_ID` are grouped under `affected_entity`, which contains `type` and `id`. Missing values are JSON `null`; numeric Exasol values are serialized as strings to preserve decimal precision.
+
+### `GET /api/findings/<finding_id>`
+
+Returns `{"data": <finding>}` using the same finding shape as the list response. It returns `404` when the identifier is valid but no finding matches.
+
+### Error responses
+
+Errors use `{"error":{"code":"...","message":"..."}}`.
+
+| HTTP | Code | Condition |
+|---:|---|---|
+| `400` | `invalid_pagination` | `page`/`page_size` is not an integer or is outside its allowed range. |
+| `400` | `invalid_filter` | Unsupported type/severity or malformed scenario token. |
+| `400` | `invalid_finding_id` | Detail ID fails identifier validation. |
+| `404` | `not_found` | Route or finding does not exist. |
+| `405` | `method_not_allowed` | HTTP method is unsupported. |
+| `503` | `database_unavailable` | Database connection or query failed. |
+| `500` | `internal_error` | Unexpected application failure. |
+
+Example invalid-filter response: `{"error":{"code":"invalid_filter","message":"Unsupported severity"}}`. Database errors never return driver messages or credential details.
 
 ## Integration smoke test
 
@@ -53,8 +127,12 @@ Invoke-RestMethod 'http://127.0.0.1:5000/api/findings/<finding-id>'
 
 This smoke test only reads the view. It does not alter staging data or reload CSVs. The automated API tests use a mocked database connection and do not require a running Exasol instance.
 
-### Latest verification status
+### Verification snapshot (2026-10-18)
 
 Verification on 2026-10-18 used the dedicated API identity from the ignored local configuration; no SYS login was used and credentials were not emitted. Direct PyExasol `SELECT 1` succeeded, and `OPS_INTEL.V_FINDINGS` contained 17 findings. Live Flask requests all returned HTTP 200: `/health` reported the database connected; page 1 and page 2 with page size 2 each returned 2 rows; the list total was 17; finding-type, severity, and scenario-instance filters returned 3, 6, and 2 matches respectively; and the single-finding endpoint returned the requested record. The API code now uses PyExasol 0.27.0's certificate-pin DSN format, and pagination applies a parameterized row-number range because Exasol rejected PyExasol-formatted parameters inside `LIMIT`.
 
-The API suite passed 9 tests, Exasol contract suite passed 7 tests, and synthetic-data suite passed 12 tests. `git diff --check` passed. These live endpoint results verify authentication, view access, response serialization, filtering, pagination, and single-record lookup against the current local Exasol instance.
+The API suite passed 9 tests, Exasol contract suite passed 7 tests, and synthetic-data suite passed 12 tests. `git diff --check` passed. These live endpoint results verified authentication, view access, response serialization, filtering, pagination, and single-record lookup at that time.
+
+### Latest verification status (2026-10-19)
+
+The configured read-only identity returned `CURRENT_USER=OPSNEXUS_API`; `SELECT 1` succeeded and the view returned 17 rows. All eight expected scenario targets matched: healthy baseline had no findings, each of the six labeled positive scenarios contained its target family, and the inconclusive scenario remained unlabelled while showing evidence signals. Every live finding passed the local evidence-audit implementation. Live `/health`, paginated list pages, all seven finding-type filters, a scenario filter, empty results, and detail/list response consistency were verified. Staging table visibility and ADF run status remain outside this API identity's access and were not independently verified. Current test totals at handoff: synthetic **12**, Exasol SQL/UDF contract **21**, and API **10**.

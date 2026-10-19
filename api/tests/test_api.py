@@ -74,9 +74,48 @@ class FindingsApiTests(unittest.TestCase):
             "limit": 10, "offset": 0,
         })
 
+    def test_pipeline_failure_timestamp_evidence_is_normalized_as_utc(self):
+        cases = (
+            ("2026-10-14 08:00:00", "2026-10-14T08:00:00Z"),
+            ("2026-10-14T08:00:00Z", "2026-10-14T08:00:00Z"),
+            ("2026-10-14T13:30:00+05:30", "2026-10-14T08:00:00Z"),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.rows[0]["FINDING_TYPE"] = "PIPELINE_FAILURE"
+                self.rows[0]["EVIDENCE"] = f"run_id=RUN-1; started_at={source}; other=value"
+                response = self.client.get("/api/findings")
+                self.assertEqual(
+                    response.json["data"][0]["evidence"],
+                    f"run_id=RUN-1; started_at={expected}; other=value",
+                )
+
+    def test_unknown_or_local_timestamp_evidence_is_not_labeled_utc(self):
+        for source in ("yesterday morning", "2026-10-14 08:00:00 PST"):
+            with self.subTest(source=source):
+                original = f"run_id=RUN-1; started_at={source}; other=value"
+                self.rows[0]["FINDING_TYPE"] = "PIPELINE_FAILURE"
+                self.rows[0]["EVIDENCE"] = original
+                response = self.client.get("/api/findings")
+                self.assertEqual(response.json["data"][0]["evidence"], original)
+
     def test_single_finding_and_not_found(self):
-        self.assertEqual(self.client.get("/api/findings/F-001").status_code, 200)
+        listed = self.client.get("/api/findings?page=1&page_size=1")
+        detailed = self.client.get("/api/findings/F-001")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(detailed.status_code, 200)
+        self.assertEqual(detailed.json["data"], listed.json["data"][0])
         self.assertEqual(self.client.get("/api/findings/UNKNOWN").status_code, 404)
+
+    def test_empty_list_has_zero_counts(self):
+        app = create_app(lambda: FakeConnection([], []))
+        app.config["TESTING"] = True
+        response = app.test_client().get("/api/findings")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, {
+            "data": [],
+            "pagination": {"page": 1, "page_size": 50, "total_count": 0, "total_pages": 0},
+        })
 
     def test_rejects_invalid_filters_and_pagination(self):
         for url in ("/api/findings?page=0", "/api/findings?page_size=101", "/api/findings?severity=BOGUS", "/api/findings?scenario_instance_id=x%20OR%201=1"):
@@ -86,9 +125,15 @@ class FindingsApiTests(unittest.TestCase):
     def test_database_error_is_structured_and_does_not_leak(self):
         app = create_app(lambda: (_ for _ in ()).throw(RuntimeError("password=secret")))
         app.config["TESTING"] = True
-        response = app.test_client().get("/health")
-        self.assertEqual(response.status_code, 503)
-        self.assertNotIn("secret", response.get_data(as_text=True))
+        client = app.test_client()
+        for path in ("/health", "/api/findings", "/api/findings/F-001"):
+            with self.subTest(path=path):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json, {
+                    "error": {"code": "database_unavailable", "message": "Database is unavailable"},
+                })
+                self.assertNotIn("secret", response.get_data(as_text=True))
 
     def test_sys_is_rejected_as_api_identity(self):
         with patch.dict("os.environ", {

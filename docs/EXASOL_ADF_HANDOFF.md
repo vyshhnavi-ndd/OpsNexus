@@ -1,6 +1,6 @@
 # Exasol / Azure Data Factory handoff
 
-Status: proposed integration contract for Logesh. The fixed deployment choice is local Exasol Personal, not Exasol SaaS. No Azure resource, network rule, credential, or ADF pipeline is provisioned by this repository change.
+Status: backend staging/view contract for Logesh's ADF and dashboard integration. The fixed database choice is local Exasol Personal, not Exasol SaaS. This repository does not provision Azure resources or ADF pipelines. On 2026-10-19 the local read-only API identity verified `CURRENT_USER`, `SELECT 1`, and 17 findings. Logesh has reported his ADF/SHIR connection and staging-table verification; pipeline run details and staging counts were not independently checked through the API identity.
 
 ## Responsibilities
 
@@ -12,7 +12,7 @@ ADF belongs at the staging boundary because it can validate headers, row counts,
 
 ## Connection properties (no secrets)
 
-The current Personal manifest proposes host `127.0.0.1`, TCP port `8563`, user `sys`, TLS enabled with `insecureSkipCertValidation=true`, and a self-signed/local certificate posture. This is an observed configuration value, not a successful connection result; the port currently refuses connections. The launcher reports the deployment as running, but recovery and `SELECT 1` remain pending because `exasol` is not on the PowerShell PATH. After recovery, use `exasol info` as the source of truth for host/port/TLS details.
+The recovered local Personal instance was read-only verified through the certificate-pinned API connection as `OPSNEXUS_API`. The Windows User DSN `OpsNexusExasol` currently exposes `EXAUID=sys` and a `NOCERTCHECK` host setting; do not use it for the non-SYS ADF identity or treat the DSN name as proof of the connected user. Configure and test the ADF linked service's own least-privilege identity and certificate validation from SHIR. Use the installed Launcher `info` command or the approved client configuration as the source of current host/port/TLS details.
 
 For the eventual ADF linked service, Logesh needs the final reachable Personal host/address, TCP port, database name if applicable, least-privilege username, password/secret reference, Exasol ODBC driver installation on the SHIR host, encryption/TLS setting, and certificate-validation policy. Do not place passwords in JSON, SQL, URLs, DSNs, Git, or this handoff. Use the approved secret store.
 

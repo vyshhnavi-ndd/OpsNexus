@@ -43,7 +43,7 @@ pipeline_failures AS (
         CAST('PIPELINE' AS VARCHAR(100)) AS AFFECTED_ENTITY_TYPE,
         CAST(r.PIPELINE_ID AS VARCHAR(200)) AS AFFECTED_ENTITY_ID,
         CAST('run_id=' || r.RUN_ID || '; measured_status=' || UPPER(r.STATUS) ||
-             '; expected_status=SUCCEEDED; started_at=' || CAST(r.STARTED_AT AS VARCHAR(50)) ||
+             '; expected_status=SUCCEEDED; started_at=' || CAST(r.STARTED_AT AS VARCHAR(50)) || 'Z' ||
              '; upstream_dependency_context=' || COALESCE(uc.CONTEXT_TEXT, 'none') ||
              '; downstream_dependency_context=' || COALESCE(dc.CONTEXT_TEXT, 'none')
              AS VARCHAR(2000)) AS EVIDENCE,

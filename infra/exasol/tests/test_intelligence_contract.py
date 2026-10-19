@@ -2,8 +2,14 @@
 
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
-from infra.exasol.tests.evaluate_intelligence import CAUSE_TO_FINDING, FINDINGS_SQL, evaluate_results
+from infra.exasol.tests.evaluate_intelligence import (
+    CAUSE_TO_FINDING,
+    FINDINGS_SQL,
+    _query_live_view,
+    evaluate_results,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -54,12 +60,40 @@ class IntelligenceContractTests(unittest.TestCase):
         self.assertIn("p.RELATIVE_GAP > 0.10", SQL)
         self.assertIn("COUNT(DISTINCT i.INCIDENT_ID) >= 2", SQL)
 
+    def test_pipeline_failure_timestamp_is_explicitly_utc_in_evidence(self) -> None:
+        self.assertIn("CAST(r.STARTED_AT AS VARCHAR(50)) || 'Z'", SQL)
+
     def test_evaluator_maps_findings_without_using_live_sql_as_ground_truth(self) -> None:
         self.assertEqual(
             CAUSE_TO_FINDING["CROSS_DOMAIN_INCONSISTENCY"],
             "CROSS_DOMAIN_INCONSISTENCY",
         )
         self.assertIn("OPS_INTEL.V_FINDINGS", FINDINGS_SQL)
+
+    def test_live_evaluator_uses_configured_api_connection_and_closes_it(self) -> None:
+        class Statement:
+            def fetchall(self):
+                return [{"finding_id": "F-1", "scenario_instance_id": "case-1",
+                         "finding_type": "PIPELINE_FAILURE", "severity": "HIGH"}]
+
+        class Connection:
+            closed = False
+
+            def execute(self, sql):
+                self.sql = sql
+                return Statement()
+
+            def close(self):
+                self.closed = True
+
+        connection = Connection()
+        with patch("api.app._connect_from_environment", return_value=connection) as connect:
+            rows = _query_live_view()
+
+        connect.assert_called_once_with()
+        self.assertTrue(connection.closed)
+        self.assertIn("OPS_INTEL.V_FINDINGS", connection.sql)
+        self.assertEqual(rows[0]["FINDING_ID"], "F-1")
 
     def test_evaluator_excludes_inconclusive_and_unlabeled_scenarios_from_metrics(self) -> None:
         from json import loads
