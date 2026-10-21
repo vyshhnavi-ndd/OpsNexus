@@ -181,6 +181,24 @@ class FindingsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 405)
         self.assertEqual(response.json["error"]["code"], "method_not_allowed")
 
+    def test_assistant_missing_ollama_model_has_clear_non_secret_error(self):
+        from io import BytesIO
+
+        with patch.dict("os.environ", {
+            "OLLAMA_URL": "http://127.0.0.1:11434",
+            "OLLAMA_MODEL": "llama3:latest",
+        }, clear=False), patch("api.app.load_dotenv"), patch(
+            "api.app.urlopen", return_value=BytesIO(b'{"models":[]}'),
+        ):
+            response = self.client.post(
+                "/api/rag/query",
+                json={"question": "Summarize the current findings."},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json["error"]["code"], "assistant_model_missing")
+        self.assertNotIn("http://", response.get_data(as_text=True))
+
 
 if __name__ == "__main__":
     unittest.main()
