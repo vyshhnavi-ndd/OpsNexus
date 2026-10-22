@@ -1,32 +1,27 @@
 import os
 import re
 import ssl
-import sys
+import time
 import logging
 import sqlite3
 import json
-from datetime import date, datetime
+import threading
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pyexasol
+import requests
 from pyexasol.exceptions import ExaAuthError
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from dotenv import dotenv_values, load_dotenv
+from azure.identity import ClientSecretCredential
 
-
-import time
-import threading
-import requests
 if __package__:
     from .request_store import create_request, list_requests
 else:
     from request_store import create_request, list_requests
-
-from datetime import date, timedelta
-from flask import jsonify, request
-from azure.identity import ClientSecretCredential
 
 # Cost data is cached for 6 hours.
 COST_CACHE_TTL = 6 * 60 * 60
@@ -86,29 +81,12 @@ APPROVED_TABLES = {
 
 # Exasol SQL identifiers are quoted only after validation.
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
-READ_ONLY_START = re.compile(r"^(SELECT|WITH)\b", re.IGNORECASE)
+
 
 
 # ---------------------------------------------------------------------------
 # Exasol connection and SQL helpers
 # ---------------------------------------------------------------------------
-
-# ==================== AZURE DATA FACTORY PIPELINE API ====================
-
-import os
-import requests
-
-from datetime import datetime, timedelta, timezone
-from flask import jsonify
-from azure.identity import ClientSecretCredential
-
-import os
-from datetime import date, datetime, timedelta, timezone
-
-import requests
-from flask import jsonify, request
-from azure.identity import ClientSecretCredential
-
 
 # Use the environment variables already configured for OpsNexus.
 SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID", "")
@@ -1611,15 +1589,6 @@ def debug_adf_run():
         }), 500
 
 
-def safe_json(response):
-    try:
-        payload = response.json()
-    except ValueError:
-        return {}
-    error = payload.get("error", {}) if isinstance(payload, dict) else {}
-    code = error.get("code") if isinstance(error, dict) else None
-    return {"code": str(code)[:100]} if code else {}
-
 def get_connection():
     """Create a PyExasol connection using this app's .env configuration."""
     if not EXASOL_USER:
@@ -1857,87 +1826,6 @@ def get_database_name():
         "port": EXASOL_PORT,
         "configured_schema": EXASOL_SCHEMA,
     })
-
-
-@app.get("/api/findings")
-def get_intelligence_findings():
-    """Read the curated intelligence view using the dedicated API identity."""
-    try:
-        page = int(request.args.get("page", "1"))
-        page_size = int(request.args.get("page_size", "50"))
-    except ValueError:
-        return jsonify(error={"code": "invalid_pagination", "message": "page and page_size must be integers"}), 400
-    if page < 1 or page_size < 1 or page_size > 100:
-        return jsonify(error={"code": "invalid_pagination", "message": "page must be positive and page_size must be between 1 and 100"}), 400
-
-    try:
-        # Keep intelligence credentials separate from the legacy OPS_STAGE
-        # connector. Only the already-configured API identity is used here.
-        project_root = str(BASE_DIR.parent)
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        from api.app import FINDING_COLUMNS, FINDING_TYPES, SEVERITIES, _connect_from_environment, _finding
-
-        api_env = {
-            key: value
-            for key, value in dotenv_values(BASE_DIR.parent / "api" / ".env").items()
-            if value is not None
-        }
-        for key in ("EXASOL_API_USER", "EXASOL_API_PASSWORD"):
-            if os.environ.get(key):
-                api_env[key] = os.environ[key]
-
-        connection = _connect_from_environment(api_env)
-        try:
-            current_user = str(connection.execute("SELECT CURRENT_USER").fetchval() or "")
-            if not current_user or current_user.casefold() == "sys":
-                raise RuntimeError("A dedicated non-SYS identity is required")
-
-            filters = []
-            params = {}
-            finding_type = request.args.get("finding_type")
-            if finding_type is not None:
-                finding_type = finding_type.strip().upper()
-                if finding_type not in FINDING_TYPES:
-                    return jsonify(error={"code": "invalid_filter", "message": "Unsupported finding_type"}), 400
-                filters.append("FINDING_TYPE = {finding_type}")
-                params["finding_type"] = finding_type
-            severity = request.args.get("severity")
-            if severity is not None:
-                severity = severity.strip().upper()
-                if severity not in SEVERITIES:
-                    return jsonify(error={"code": "invalid_filter", "message": "Unsupported severity"}), 400
-                filters.append("SEVERITY = {severity}")
-                params["severity"] = severity
-
-            where = " WHERE " + " AND ".join(filters) if filters else ""
-            total = int(connection.execute(
-                f"SELECT COUNT(*) FROM OPS_INTEL.V_FINDINGS{where}", query_params=params
-            ).fetchval() or 0)
-            params.update(limit=page_size, offset=(page - 1) * page_size)
-            rows = connection.execute(
-                f"SELECT {', '.join(FINDING_COLUMNS)} FROM ("
-                f"SELECT {', '.join(FINDING_COLUMNS)}, "
-                "ROW_NUMBER() OVER (ORDER BY FINDING_ID) AS API_ROW_NUM "
-                f"FROM OPS_INTEL.V_FINDINGS{where}) "
-                "WHERE API_ROW_NUM > {offset} AND API_ROW_NUM <= {offset} + {limit} "
-                "ORDER BY API_ROW_NUM",
-                query_params=params,
-            ).fetchall()
-            return jsonify(
-                data=[_finding(row) for row in rows],
-                pagination={
-                    "page": page,
-                    "page_size": page_size,
-                    "total_count": total,
-                    "total_pages": (total + page_size - 1) // page_size,
-                },
-            )
-        finally:
-            connection.close()
-    except Exception:
-        app.logger.warning("Unable to read curated Exasol intelligence findings")
-        return jsonify(error={"code": "intelligence_unavailable", "message": "Intelligence findings are unavailable"}), 503
 
 
 # ---------------------------------------------------------------------------
