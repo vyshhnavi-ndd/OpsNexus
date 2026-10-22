@@ -40,7 +40,7 @@ All 17 current findings passed the local evidence-audit check. The seven familie
 | `CROSS_DOMAIN_INCONSISTENCY` | `STG_DATASET_OBSERVATIONS`, `STG_DATASETS`, `STG_PIPELINE_RUNS`, `STG_BUSINESS_KPIS`, `STG_DEPENDENCIES` | Same metric across related domains, normalized relative gap, both source chains | `MEDIUM`; 10% is a proposed threshold |
 | `INCIDENT_RECURRENCE` | `STG_INCIDENT_HISTORY` plus current run/observation/freshness results for an active recurrence | Distinct incident/event count, category, run and quality-result references | `MEDIUM`; two occurrences, with no age window |
 
-The data generator writes timestamps in UTC ISO-8601 form. `STARTED_AT` is a timezone-naive Exasol `TIMESTAMP`, defined as UTC by the project schema. Exasol's timestamp cast drops the offset. The repository's view SQL has a pending correction to append `Z`, but it has not been deployed and the live view remains unchanged. As a temporary compatibility measure, Flask normalizes only the `started_at` value in `PIPELINE_FAILURE` evidence: naive contractually UTC values receive one `Z`, explicit offsets are converted to UTC, existing `Z` values are kept singular, and unparseable/local labels are left untouched. This API behavior and its tests are documented in [`FLASK_API.md`](./FLASK_API.md). The view does not claim recovery or root cause. Specific stale/incomplete/KPI findings can coexist with `QUALITY_FAILURE` by design. The inconclusive case is not forced into a cause label.
+The data generator writes timestamps in UTC ISO-8601 form. `STARTED_AT` is a timezone-naive Exasol `TIMESTAMP`, defined as UTC by the project schema. Exasol's timestamp cast drops the offset. The view SQL in `infra/exasol/sql/03_create_intel_findings.sql` appends `'Z'` to `STARTED_AT` in the `PIPELINE_FAILURE` evidence string. If the live Exasol view pre-dates that SQL update, re-execute the file as an authorized non-SYS identity to bring the live view in sync. The Flask normalization in `api/app.py` handles both cases (naive and Z-suffixed) and remains in place as a defence-in-depth measure. The view does not claim recovery or root cause. Specific stale/incomplete/KPI findings can coexist with `QUALITY_FAILURE` by design. The inconclusive case is not forced into a cause label.
 
 ## Stable dashboard contract
 
@@ -86,10 +86,15 @@ The data generator writes timestamps in UTC ISO-8601 form. `STARTED_AT` is a tim
 Run from the repository root with the existing Windows project environment:
 
 ```powershell
+# synthetic-data, Exasol contract, and api suites all use the synthetic-data venv
+$env:PYTHONPATH = "D:\OpsNexus"
 & '.\synthetic-data\.venv\Scripts\python.exe' -m unittest discover -s synthetic-data/tests
 & '.\synthetic-data\.venv\Scripts\python.exe' -m unittest discover -s infra/exasol/tests
 & '.\synthetic-data\.venv\Scripts\python.exe' -m unittest discover -s api/tests
+
+# backend/tests uses its own separate venv
+& '.\backend\venv\Scripts\python.exe' -m unittest discover -s backend/tests
 git diff --check
 ```
 
-The timestamp SQL correction still requires a manual review and execution in an approved SQL client as an authorized non-SYS identity that can replace `OPS_INTEL.V_FINDINGS`. Verify `CURRENT_USER` and effective view-replacement permission in that session first. Do not use the API identity, a SYS-default Launcher connection, or an unverified ODBC DSN. Until the authorized identity is available and the SQL executes successfully, treat the live view timestamp as unchanged; the Flask normalization is the temporary workaround.
+The view SQL in `infra/exasol/sql/03_create_intel_findings.sql` already contains the `'Z'` suffix on `STARTED_AT`. If the live Exasol view pre-dates that file, re-execute it as an authorized non-SYS identity (verify `CURRENT_USER` first). Do not use the read-only `OPSNEXUS_API` identity, a SYS-default Launcher connection, or an unverified ODBC DSN for DDL.

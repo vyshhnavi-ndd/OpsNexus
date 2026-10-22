@@ -38,7 +38,7 @@ The exact dashboard contract, nullable fields, examples, and error schemas are d
 
 Finding objects expose `finding_id`, `finding_type`, `severity`, `affected_entity` (`type` and `id`), `evidence`, `recommended_action`, `source_references`, `measured_value`, `expected_value`, `threshold`, `source_run_id`, and `scenario_instance_id`. Nullable source fields are returned as JSON `null`.
 
-For `PIPELINE_FAILURE`, the API temporarily normalizes the `started_at` value inside evidence to a single UTC `Z` suffix. `OPS_STAGE.STG_PIPELINE_RUNS.STARTED_AT` is a timezone-naive Exasol `TIMESTAMP`, while the project schema and generator define it as UTC. Explicit offsets are converted to UTC; already-UTC values remain single-suffixed, and unparseable/local labels are preserved unchanged. This is an API compatibility fix only: the Exasol view definition has not been updated in the live database. The SQL-side correction remains pending deployment through an authorized non-SYS account.
+For `PIPELINE_FAILURE`, the API normalizes the `started_at` value inside evidence to a single UTC `Z` suffix. `OPS_STAGE.STG_PIPELINE_RUNS.STARTED_AT` is a timezone-naive Exasol `TIMESTAMP`, while the project schema and generator define it as UTC. Explicit offsets are converted to UTC; already-UTC values remain single-suffixed, and unparseable/local labels are preserved unchanged. The SQL file `infra/exasol/sql/03_create_intel_findings.sql` already appends `'Z'` to `STARTED_AT` in the `PIPELINE_FAILURE` evidence; if the live view was not yet replaced after the last SQL update, re-execute that file as an authorized non-SYS identity.
 
 ## Dashboard integration contract
 
