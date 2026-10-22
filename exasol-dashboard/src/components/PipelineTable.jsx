@@ -1,11 +1,10 @@
 
-import React, { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   RefreshCw, ChevronDown, ChevronRight, Search,
-  CheckCircle2, XCircle, Clock3, Activity, CalendarClock,
+  CheckCircle2, Clock3, Activity, CalendarClock,
   UserRound, AlertCircle
 } from "lucide-react";
-import Badge from "./Badge";
 
 const API_URL = "/api/adf";
 
@@ -344,7 +343,7 @@ useEffect(() => {
                 const isExpanded = Boolean(expanded[runId]);
 
                 return (
-                  <React.Fragment key={runId}>
+                  <Fragment key={runId}>
                     <tr>
                       <td>
                         <strong>{run.pipeline_name || "Unnamed pipeline"}</strong>
@@ -459,7 +458,7 @@ useEffect(() => {
                         </td>
                       </tr>
                     )}
-                  </React.Fragment>
+                  </Fragment>
                 );
               })}
             </tbody>

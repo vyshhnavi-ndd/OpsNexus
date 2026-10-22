@@ -272,7 +272,12 @@ def create_app(connection_factory: Callable[[], Any] | None = None) -> Flask:
             return jsonify(error={"code": "not_found", "message": "Finding not found"}), 404
         return jsonify(data=_finding(rows[0]))
 
-    @app.post("/api/rag/query")
+    dashboard_contract = json.loads(
+        (Path(__file__).resolve().parents[1] / "contracts" / "dashboard_api.json")
+        .read_text(encoding="utf-8")
+    )
+
+    @app.post(dashboard_contract["assistant"]["path"])
     def rag_query():
         load_dotenv(Path(__file__).with_name(".env"), override=False)
         payload = request.get_json(silent=True)

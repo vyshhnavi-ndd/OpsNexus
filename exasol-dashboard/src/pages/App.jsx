@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import {
   Activity,
@@ -29,8 +29,9 @@ import PipelineTable from "./components/PipelineTable";
 import ExasolDatabase from "./pages/ExasolDatabase";
 import ChatPage from "./pages/ChatPage";
 import RequestsPage from "./pages/RequestsPage";
+import { createDataRequest, listDataRequests, queryDataAssistant } from "../dashboardApi";
 
-const API = "http://127.0.0.1:5000/api";
+const API = "/api";
 const DEFAULT_SCHEMA = "OPS_STAGE";
 const DEFAULT_HISTORY_DAYS = 7;
 
@@ -68,7 +69,12 @@ function formatNumber(value, digits = 0) {
 }
 
 function formatPercent(value) {
-  return value == null ? "—" : `${formatNumber(value, 1)}%`;
+  if (value == null) return "Unavailable";
+  return `${formatNumber(value, 1)}%`;
+}
+
+function formatMetric(value, digits = 0) {
+  return value == null ? "Unavailable" : formatNumber(value, digits);
 }
 
 function getErrorMessage(error, fallback) {
@@ -123,6 +129,8 @@ export default function App() {
 
   const [requests, setRequests] = useState([]);
   const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [requestError, setRequestError] = useState("");
 
   const [messages, setMessages] = useState(INITIAL_MESSAGES);
   const [chatText, setChatText] = useState("");
@@ -206,7 +214,11 @@ export default function App() {
         trustResult.status === "fulfilled" &&
         trustResult.value.data?.success
       ) {
-        setTrustMetrics(trustResult.value.data.metrics || null);
+        setTrustMetrics({
+          ...(trustResult.value.data.metrics || {}),
+          available: trustResult.value.data.metrics?.available !== false,
+          message: trustResult.value.data.message || trustResult.value.data.metrics?.message,
+        });
       } else {
         setTrustMetrics(null);
       }
@@ -215,7 +227,11 @@ export default function App() {
         costResult.status === "fulfilled" &&
         costResult.value.data?.success
       ) {
-        setCostMetrics(costResult.value.data.metrics || null);
+        setCostMetrics({
+          ...(costResult.value.data.metrics || {}),
+          available: costResult.value.data.available !== false,
+          message: costResult.value.data.message,
+        });
       } else {
         setCostMetrics(null);
       }
@@ -235,6 +251,24 @@ export default function App() {
       setBusy(false);
     }
   }, []);
+
+  const loadRequests = useCallback(async () => {
+    setRequestsLoading(true);
+    setRequestError("");
+    try {
+      const response = await listDataRequests(axios, { timeout: 8000 });
+      setRequests(Array.isArray(response.data?.requests) ? response.data.requests : []);
+    } catch (error) {
+      setRequests([]);
+      setRequestError(getErrorMessage(error, "The request service is unavailable."));
+    } finally {
+      setRequestsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (page === "requests") loadRequests();
+  }, [page, loadRequests]);
 
   const refreshAll = useCallback(async () => {
     await Promise.all([loadPlatformData(), loadAdfRuns()]);
@@ -267,24 +301,16 @@ export default function App() {
     }
 
     try {
-      const response = await axios.post(
-        `${API}/requests`,
-        {
-          requester: "app.user",
-          dataset_id: dataset,
-          business_justification: reason,
-          priority: requestForm.priority,
-        },
-        { timeout: 10000 }
-      );
-
-      const record = {
-        id: response.data?.request_id || `REQ-${Date.now()}`,
+      const response = await createDataRequest(axios, {
         dataset,
         reason,
         priority: requestForm.priority,
-        status: response.data?.status || "Pending",
-      };
+      }, { timeout: 10000 });
+
+      if (!response.data?.success || !response.data?.request) {
+        throw new Error(response.data?.error || "The request was not saved.");
+      }
+      const record = response.data.request;
 
       setRequests((current) => [record, ...current]);
       setNotice("Data request submitted successfully.");
@@ -310,20 +336,20 @@ export default function App() {
     setChatBusy(true);
 
     try {
-      const response = await axios.post(
-        `${API}/chat/message`,
-        { message: question, requester: "app.user" },
-        { timeout: 30000 }
-      );
+      const response = await queryDataAssistant(axios, question);
 
       const answer =
         response.data?.answer ||
         response.data?.message ||
         "The assistant returned an empty response.";
+      const sources = response.data?.source_finding_ids || [];
+      const answerWithSources = sources.length
+        ? `${answer}\n\nSources: ${sources.join(", ")}`
+        : answer;
 
       setMessages((current) => [
         ...current,
-        { role: "assistant", text: answer },
+        { role: "assistant", text: answerWithSources },
       ]);
     } catch (error) {
       setMessages((current) => [
@@ -332,7 +358,7 @@ export default function App() {
           role: "assistant",
           text: `Unable to reach the chat API: ${getErrorMessage(
             error,
-            "Check POST /api/chat/message."
+            "Check POST /api/rag/query."
           )}`,
         },
       ]);
@@ -493,7 +519,7 @@ export default function App() {
                 />
                 <Metric
                   label="Total recorded cost"
-                  value={totalCost == null ? "—" : formatNumber(totalCost)}
+                  value={formatMetric(totalCost)}
                   hint={
                     totalUsage == null
                       ? "No live usage metric available"
@@ -559,12 +585,12 @@ export default function App() {
                     <div className="health-item">
                       <ShieldCheck size={17} />
                       <span>Trust metrics</span>
-                      <strong>{trustScore == null ? "—" : formatPercent(trustScore)}</strong>
+                      <strong>{formatPercent(trustScore)}</strong>
                     </div>
                     <div className="health-item">
                       <Zap size={17} />
                       <span>Cost per usage unit</span>
-                      <strong>{formatNumber(costPerUsageUnit, 4)}</strong>
+                      <strong>{formatMetric(costPerUsageUnit, 4)}</strong>
                     </div>
                   </div>
                 </Card>
@@ -698,15 +724,15 @@ export default function App() {
                 />
                 <Metric
                   label="Quality checks"
-                  value={formatNumber(qualityChecks)}
+                  value={formatMetric(qualityChecks)}
                   hint="Recorded validation results"
                   icon={CheckCircle2}
                   color="orange"
                 />
                 <Metric
                   label="Trust metrics"
-                  value={trustMetrics ? "Available" : "Unavailable"}
-                  hint="Backend response status"
+                  value={trustMetrics?.available === false ? "Not configured" : trustScore == null ? "Unavailable" : "Available"}
+                  hint={trustMetrics?.message || "Live trust metric status"}
                   icon={Server}
                 />
               </div>
@@ -751,36 +777,36 @@ export default function App() {
               <div className="grid metrics-grid">
                 <Metric
                   label="Total recorded cost"
-                  value={totalCost == null ? "—" : formatNumber(totalCost)}
+                  value={formatMetric(totalCost)}
                   hint="Currency depends on backend source"
                   icon={Wallet}
                   color="orange"
                 />
                 <Metric
                   label="Total usage"
-                  value={formatNumber(totalUsage)}
+                  value={formatMetric(totalUsage)}
                   hint="Recorded usage units"
                   icon={Zap}
                   color="blue"
                 />
                 <Metric
                   label="Cost per usage unit"
-                  value={formatNumber(costPerUsageUnit, 4)}
+                  value={formatMetric(costPerUsageUnit, 4)}
                   hint="Backend-calculated metric"
                   icon={Activity}
                 />
                 <Metric
                   label="Cost data"
-                  value={costMetrics ? "Available" : "Unavailable"}
-                  hint="Backend response status"
+                  value={costMetrics?.available === false ? "Not configured" : totalCost == null ? "Unavailable" : "Available"}
+                  hint={costMetrics?.message || "Live cost metric status"}
                   icon={Database}
                 />
               </div>
 
-              {!costMetrics && (
+              {(!costMetrics || costMetrics.available === false || totalCost == null) && (
                 <Card>
                   <div className="pipeline-state">
-                    Cost metrics are unavailable. No illustrative cost values are shown.
+                    {costMetrics?.message || "Cost metrics are unavailable or have no recorded values. No illustrative cost values are shown."}
                   </div>
                 </Card>
               )}
@@ -808,6 +834,9 @@ export default function App() {
               setForm={setRequestForm}
               onSubmit={submitRequest}
               search={search}
+              loading={requestsLoading}
+              error={requestError}
+              onRefresh={loadRequests}
             />
           )}
 

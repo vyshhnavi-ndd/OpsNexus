@@ -49,7 +49,10 @@ export default function IntelligencePage() {
     }
   }, [page, severity]);
 
-  useEffect(() => { loadFindings(); }, [loadFindings]);
+  useEffect(() => {
+    const timer = window.setTimeout(loadFindings, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadFindings]);
 
   return (
     <>

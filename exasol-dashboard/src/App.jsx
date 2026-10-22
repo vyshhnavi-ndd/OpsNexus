@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import {
   Activity,
@@ -17,7 +17,7 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
-import UsageBillingDashboard from "./components/UsageBillingDashboard";
+const UsageBillingDashboard = lazy(() => import("./components/UsageBillingDashboard"));
 import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Topbar from "./components/Topbar";
@@ -30,6 +30,7 @@ import ExasolDatabase from "./pages/ExasolDatabase";
 import ChatPage from "./pages/ChatPage";
 import RequestsPage from "./pages/RequestsPage";
 import IntelligencePage from "./pages/IntelligencePage";
+import { createDataRequest, listDataRequests, queryDataAssistant } from "./dashboardApi";
 
 const API = "/api";
 const DEFAULT_SCHEMA = "OPS_STAGE";
@@ -70,7 +71,12 @@ function formatNumber(value, digits = 0) {
 }
 
 function formatPercent(value) {
-  return value == null ? "—" : `${formatNumber(value, 1)}%`;
+  if (value == null) return "Unavailable";
+  return `${formatNumber(value, 1)}%`;
+}
+
+function formatMetric(value, digits = 0) {
+  return value == null ? "Unavailable" : formatNumber(value, digits);
 }
 
 function getErrorMessage(error, fallback) {
@@ -210,7 +216,11 @@ export default function App() {
         trustResult.status === "fulfilled" &&
         trustResult.value.data?.success
       ) {
-        setTrustMetrics(trustResult.value.data.metrics || null);
+        setTrustMetrics({
+          ...(trustResult.value.data.metrics || {}),
+          available: trustResult.value.data.metrics?.available !== false,
+          message: trustResult.value.data.message || trustResult.value.data.metrics?.message,
+        });
       } else {
         setTrustMetrics(null);
       }
@@ -219,7 +229,11 @@ export default function App() {
         costResult.status === "fulfilled" &&
         costResult.value.data?.success
       ) {
-        setCostMetrics(costResult.value.data.metrics || null);
+        setCostMetrics({
+          ...(costResult.value.data.metrics || {}),
+          available: costResult.value.data.available !== false,
+          message: costResult.value.data.message,
+        });
       } else {
         setCostMetrics(null);
 
@@ -257,7 +271,7 @@ export default function App() {
     setRequestsLoading(true);
     setRequestError("");
     try {
-      const response = await axios.get(`${API}/requests`, { timeout: 8000 });
+      const response = await listDataRequests(axios, { timeout: 8000 });
       setRequests(Array.isArray(response.data?.requests) ? response.data.requests : []);
     } catch (error) {
       setRequests([]);
@@ -291,7 +305,7 @@ export default function App() {
     setRequestsLoading(true);
     setRequestError("");
     try {
-      const response = await axios.post(`${API}/requests`, {
+      const response = await createDataRequest(axios, {
         dataset,
         reason,
         priority: requestForm.priority,
@@ -320,20 +334,20 @@ export default function App() {
     setChatBusy(true);
 
     try {
-      const response = await axios.post(
-        `${API}/rag/query`,
-        { question },
-        { timeout: 190000 }
-      );
+      const response = await queryDataAssistant(axios, question);
 
       const answer =
         response.data?.answer ||
         response.data?.message ||
         "The assistant returned an empty response.";
+      const sources = response.data?.source_finding_ids || [];
+      const answerWithSources = sources.length
+        ? `${answer}\n\nSources: ${sources.join(", ")}`
+        : answer;
 
       setMessages((current) => [
         ...current,
-        { role: "assistant", text: answer },
+        { role: "assistant", text: answerWithSources },
       ]);
     } catch (error) {
       setMessages((current) => [
@@ -504,7 +518,7 @@ export default function App() {
                 />
                 <Metric
                   label="Total recorded cost"
-                  value={totalCost == null ? "—" : formatNumber(totalCost)}
+                  value={formatMetric(totalCost)}
                   hint={
                     totalUsage == null
                       ? "No live usage metric available"
@@ -570,12 +584,12 @@ export default function App() {
                     <div className="health-item">
                       <ShieldCheck size={17} />
                       <span>Trust metrics</span>
-                      <strong>{trustScore == null ? "—" : formatPercent(trustScore)}</strong>
+                      <strong>{formatPercent(trustScore)}</strong>
                     </div>
                     <div className="health-item">
                       <Zap size={17} />
                       <span>Cost per usage unit</span>
-                      <strong>{formatNumber(costPerUsageUnit, 4)}</strong>
+                      <strong>{formatMetric(costPerUsageUnit, 4)}</strong>
                     </div>
                   </div>
                 </Card>
@@ -716,8 +730,8 @@ export default function App() {
                 />
                 <Metric
                   label="Trust metrics"
-                  value={trustMetrics ? "Available" : "Unavailable"}
-                  hint="Backend response status"
+                  value={trustMetrics?.available === false ? "Not configured" : trustScore == null ? "Unavailable" : "Available"}
+                  hint={trustMetrics?.message || "Live trust metric status"}
                   icon={Server}
                 />
               </div>
@@ -756,7 +770,11 @@ export default function App() {
               </Card>
             </>
           )}
-          {page === "cost" && <UsageBillingDashboard />}
+          {page === "cost" && (
+            <Suspense fallback={<div className="card">Loading cost intelligence…</div>}>
+              <UsageBillingDashboard />
+            </Suspense>
+          )}
           {page === "intelligence" && <IntelligencePage />}
           {page === "database" && (
             <ExasolDatabase api={API} schemaDefault={schema} />

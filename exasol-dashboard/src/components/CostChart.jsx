@@ -1,5 +1,4 @@
-import React from "react";
-import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
 import Card from "./Card";
 import SectionTitle from "./SectionTitle";
 export default function CostChart({ data=[], mode="cost" }) {

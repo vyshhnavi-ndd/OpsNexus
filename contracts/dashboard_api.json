@@ -1,0 +1,16 @@
+{
+  "requests": {
+    "path": "/api/requests",
+    "listResponseKey": "requests",
+    "createRequestFields": ["dataset", "reason", "priority"],
+    "createResponseKey": "request"
+  },
+  "assistant": {
+    "path": "/api/rag/query",
+    "upstream": "http://127.0.0.1:5001",
+    "questionField": "question",
+    "answerField": "answer",
+    "sourcesField": "source_finding_ids",
+    "timeoutMs": 210000
+  }
+}

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,7 +36,7 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
 
 
 def list_requests(database_path: str | Path, limit: int = 200) -> list[dict]:
-    with _connect(database_path) as connection:
+    with closing(_connect(database_path)) as connection:
         rows = connection.execute(
             "SELECT id, dataset, reason, priority, status, created_at "
             "FROM data_requests ORDER BY created_at DESC, id DESC LIMIT ?",
@@ -62,10 +63,11 @@ def create_request(database_path: str | Path, dataset: str, reason: str, priorit
         "status": "Pending",
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    with _connect(database_path) as connection:
-        connection.execute(
-            "INSERT INTO data_requests (id, dataset, reason, priority, status, created_at) "
-            "VALUES (:id, :dataset, :reason, :priority, :status, :created_at)",
-            record,
-        )
+    with closing(_connect(database_path)) as connection:
+        with connection:
+            connection.execute(
+                "INSERT INTO data_requests (id, dataset, reason, priority, status, created_at) "
+                "VALUES (:id, :dataset, :reason, :priority, :status, :created_at)",
+                record,
+            )
     return record

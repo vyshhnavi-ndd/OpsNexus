@@ -1,5 +1,4 @@
-import React from "react";
-import { Zap, Settings2, Database } from "lucide-react";
+import { Zap } from "lucide-react";
 export default function Sidebar({ nav, page, switchPage, mobileOpen, failedRuns, apiState, schema, tableCount }) {
   return <aside className={`sidebar ${mobileOpen ? "open" : ""}`}>
     <div className="brand"><div className="brand-logo"><Zap size={22}/></div><div><div className="brand-name">EXASOL DATAOPS</div><div className="brand-sub">INTELLIGENCE PLATFORM</div></div></div>

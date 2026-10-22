@@ -4,6 +4,7 @@ import ssl
 import sys
 import logging
 import sqlite3
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -46,6 +47,9 @@ _cost_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
+API_CONTRACT = json.loads(
+    (BASE_DIR.parent / "contracts" / "dashboard_api.json").read_text(encoding="utf-8")
+)
 load_dotenv(BASE_DIR / ".env", override=True)
 
 app = Flask(__name__)
@@ -66,7 +70,19 @@ EXASOL_SCHEMA = os.getenv("EXASOL_SCHEMA", "OPS_STAGE").strip().upper()
 NO_CERT_CHECK = os.getenv("EXASOL_NOCERTCHECK", "false").strip().lower() == "true"
 EXASOL_CERTIFICATE_FINGERPRINT = os.getenv("EXASOL_CERTIFICATE_FINGERPRINT", "").strip()
 APPROVED_SCHEMA = "OPS_STAGE"
-APPROVED_TABLES = {"V_FINDINGS"}
+APPROVED_TABLES = {
+    "STG_DATA_SOURCES",
+    "STG_PIPELINE_DEFINITIONS",
+    "STG_DATASETS",
+    "STG_QUALITY_CHECKS",
+    "STG_DEPENDENCIES",
+    "STG_SCENARIO_METADATA",
+    "STG_PIPELINE_RUNS",
+    "STG_DATASET_OBSERVATIONS",
+    "STG_QUALITY_RESULTS",
+    "STG_BUSINESS_KPIS",
+    "STG_INCIDENT_HISTORY",
+}
 
 # Exasol SQL identifiers are quoted only after validation.
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -606,16 +622,7 @@ def usage_billing():
         # Calculate summary metrics
         # ----------------------------------------------------
 
-        recorded_cost = sum(
-            row["cost_inr"]
-            for row in daily
-            if row["cost_inr"] is not None
-        )
-
-        recorded_days = sum(
-            row["cost_inr"] is not None
-            for row in daily
-        )
+        cost_summary = summarize_cost_records(daily, billing_status)
 
         return jsonify({
             "success": (
@@ -631,10 +638,10 @@ def usage_billing():
                 "from": start_date.isoformat(),
                 "to": end_date.isoformat(),
                 "days_requested": days,
-                "days_with_cost_records": recorded_days,
+                "days_with_cost_records": cost_summary["days_with_cost_records"],
             },
             "summary": {
-                "recorded_cost_inr": round(recorded_cost, 2),
+                "recorded_cost_inr": cost_summary["recorded_cost_inr"],
                 "pipeline_runs": (
                     len(runs)
                     if pipeline_status == "working"
@@ -1692,12 +1699,14 @@ def query_rows(connection, sql):
 
 
 def metadata_tables(connection, schema):
+    approved_names = ", ".join(sql_string(name) for name in sorted(APPROVED_TABLES))
     return query_rows(
         connection,
         f"""
         SELECT TABLE_SCHEMA, TABLE_NAME
         FROM EXA_ALL_TABLES
         WHERE TABLE_SCHEMA = {sql_string(schema.upper())}
+          AND TABLE_NAME IN ({approved_names})
         ORDER BY TABLE_NAME
         """,
     )
@@ -1728,7 +1737,7 @@ def ensure_approved_object(schema, table=None):
     if str(schema).strip().upper() != APPROVED_SCHEMA:
         raise ValueError(f"Only the {APPROVED_SCHEMA} schema is available to this API.")
     if table is not None and str(table).strip().upper() not in APPROVED_TABLES:
-        raise ValueError("Only the curated V_FINDINGS view is available to this API.")
+        raise ValueError("Only the approved OPS_STAGE staging tables are available to this API.")
 
 
 def first_existing(columns, *names):
@@ -1762,7 +1771,14 @@ def error_response(exc, status=500):
     app.logger.exception("API request failed")
 
     text = str(exc).lower()
-    if isinstance(exc, RuntimeError) and "authentication failed" in text:
+    if isinstance(exc, RuntimeError) and "sys is not permitted" in text:
+        message = (
+            "The configured Exasol account is SYS. Configure an authorized non-SYS "
+            "identity with the required OPS_STAGE access."
+        )
+        code = "EXASOL_SYS_FORBIDDEN"
+        status = 503
+    elif isinstance(exc, RuntimeError) and "authentication failed" in text:
         message = str(exc)
         code = "EXASOL_AUTH_FAILED"
         status = 503
@@ -2024,6 +2040,11 @@ def tables():
             "success": True,
             "schema": schema,
             "count": len(rows),
+            "message": (
+                None if rows else
+                "No approved OPS_STAGE staging tables are visible to this identity; "
+                "this does not establish whether they exist."
+            ),
             "tables": rows,
         })
     except ValueError as exc:
@@ -2144,9 +2165,9 @@ def overview():
             "table_count": len(names),
             "tables": names,
             "dashboards": {
-                "pipelines": "PIPELINE_RUNS" in names,
-                "trust": bool({"TRUST_SCORES", "DATA_QUALITY_RESULTS", "STG_QUALITY_RESULTS"} & set(names)),
-                "cost": "COST_USAGE_HISTORY" in names,
+                "pipelines": "STG_PIPELINE_RUNS" in names,
+                "trust": "STG_QUALITY_RESULTS" in names,
+                "cost": False,
             },
         })
     except Exception as exc:
@@ -2161,7 +2182,15 @@ def request_database_path():
     return Path(configured) if configured else BASE_DIR / "instance" / "data_requests.sqlite3"
 
 
-@app.get("/api/requests")
+def summarize_cost_records(daily, billing_status):
+    recorded = [row["cost_inr"] for row in daily if row["cost_inr"] is not None]
+    return {
+        "recorded_cost_inr": round(sum(recorded), 2) if billing_status == "working" and recorded else None,
+        "days_with_cost_records": len(recorded) if billing_status == "working" else None,
+    }
+
+
+@app.get(API_CONTRACT["requests"]["path"])
 def get_data_requests():
     try:
         return jsonify({"success": True, "requests": list_requests(request_database_path())})
@@ -2170,7 +2199,7 @@ def get_data_requests():
         return jsonify({"success": False, "error": "Request storage is unavailable."}), 503
 
 
-@app.post("/api/requests")
+@app.post(API_CONTRACT["requests"]["path"])
 def post_data_request():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
@@ -2196,18 +2225,19 @@ def pipeline_metrics():
     try:
         connection = get_connection()
         available = metadata_tables(connection, EXASOL_SCHEMA)
-        if not table_exists(available, "PIPELINE_RUNS"):
+        table_name = "STG_PIPELINE_RUNS"
+        if not table_exists(available, table_name):
             return jsonify({
                 "success": True,
                 "available": False,
-                "message": "PIPELINE_RUNS does not exist in the configured schema.",
+                "message": f"{table_name} does not exist or is not visible in {EXASOL_SCHEMA}.",
                 "metrics": {},
             })
 
-        columns = metadata_columns(connection, EXASOL_SCHEMA, "PIPELINE_RUNS")
+        columns = metadata_columns(connection, EXASOL_SCHEMA, table_name)
         column_names = [row["column_name"].upper() for row in columns]
         qschema = quote_identifier(EXASOL_SCHEMA)
-        qtable = quote_identifier("PIPELINE_RUNS")
+        qtable = quote_identifier(table_name)
 
         total_rows = query_rows(
             connection,
@@ -2220,7 +2250,7 @@ def pipeline_metrics():
         duration_col = first_existing(column_names, "DURATION_SECONDS", "DURATION")
 
         if status_col:
-            groups = count_by_status(connection, EXASOL_SCHEMA, "PIPELINE_RUNS", status_col)
+            groups = count_by_status(connection, EXASOL_SCHEMA, table_name, status_col)
             status_counts = {
                 row["status"] or "UNKNOWN": row["total"]
                 for row in groups
@@ -2236,7 +2266,7 @@ def pipeline_metrics():
             result.update({
                 "successful_runs": successful,
                 "failed_runs": failed,
-                "success_rate_pct": round(successful * 100 / total, 2) if total else 0,
+                "success_rate_pct": round(successful * 100 / total, 2) if total else None,
                 "status_breakdown": status_counts,
             })
 
@@ -2271,34 +2301,7 @@ def trust_metrics():
         qschema = quote_identifier(EXASOL_SCHEMA)
         names = [row["table_name"].upper() for row in available]
 
-        if "TRUST_SCORES" in names:
-            columns = metadata_columns(connection, EXASOL_SCHEMA, "TRUST_SCORES")
-            column_names = [row["column_name"].upper() for row in columns]
-            score_col = first_existing(column_names, "TRUST_SCORE", "SCORE")
-            if score_col:
-                qtable = quote_identifier("TRUST_SCORES")
-                qscore = quote_identifier(score_col)
-                rows = query_rows(
-                    connection,
-                    f"""
-                    SELECT
-                        AVG({qscore}) AS AVG_TRUST_SCORE,
-                        MIN({qscore}) AS MIN_TRUST_SCORE,
-                        MAX({qscore}) AS MAX_TRUST_SCORE,
-                        COUNT(*) AS TOTAL_RECORDS
-                    FROM {qschema}.{qtable}
-                    """,
-                )
-                result["tables"]["trust_scores"] = rows[0] if rows else {}
-
-        quality_table = next(
-            (
-                table_name
-                for table_name in ("STG_QUALITY_RESULTS", "DATA_QUALITY_RESULTS")
-                if table_name in names
-            ),
-            None,
-        )
+        quality_table = "STG_QUALITY_RESULTS" if "STG_QUALITY_RESULTS" in names else None
         if quality_table:
             qtable = quote_identifier(quality_table)
             total_rows = query_rows(
@@ -2326,8 +2329,8 @@ def trust_metrics():
             result.update({
                 "available": False,
                 "message": (
-                    "Neither TRUST_SCORES nor a supported quality-results table "
-                    "exists in the configured schema, or no compatible score column was found."
+                    "STG_QUALITY_RESULTS is not visible in OPS_STAGE. No scalar trust "
+                    "score is configured by the current staging contract."
                 ),
             })
 
@@ -2341,68 +2344,15 @@ def trust_metrics():
 
 @app.get("/api/metrics/cost")
 def cost_metrics():
-    connection = None
-    try:
-        connection = get_connection()
-        available = metadata_tables(connection, EXASOL_SCHEMA)
-        if not table_exists(available, "COST_USAGE_HISTORY"):
-            return jsonify({
-                "success": True,
-                "available": False,
-                "message": "COST_USAGE_HISTORY does not exist in the configured schema.",
-                "metrics": {},
-            })
-
-        columns = metadata_columns(connection, EXASOL_SCHEMA, "COST_USAGE_HISTORY")
-        column_names = [row["column_name"].upper() for row in columns]
-        qschema = quote_identifier(EXASOL_SCHEMA)
-        qtable = quote_identifier("COST_USAGE_HISTORY")
-        cost_col = first_existing(column_names, "COST_AMOUNT", "COST")
-        usage_col = first_existing(column_names, "USAGE_UNITS", "USAGE")
-        result = {}
-
-        if cost_col:
-            qcost = quote_identifier(cost_col)
-            rows = query_rows(
-                connection,
-                f"""
-                SELECT
-                    SUM({qcost}) AS TOTAL_COST,
-                    AVG({qcost}) AS AVG_COST,
-                    COUNT(*) AS RECORD_COUNT
-                FROM {qschema}.{qtable}
-                """,
-            )
-            if rows:
-                result.update(rows[0])
-
-        if usage_col:
-            qusage = quote_identifier(usage_col)
-            rows = query_rows(
-                connection,
-                f"""
-                SELECT
-                    SUM({qusage}) AS TOTAL_USAGE,
-                    AVG({qusage}) AS AVG_USAGE
-                FROM {qschema}.{qtable}
-                """,
-            )
-            if rows:
-                result.update(rows[0])
-
-        cost = result.get("total_cost")
-        usage = result.get("total_usage")
-        result["cost_per_usage_unit"] = (
-            float(cost) / float(usage)
-            if cost is not None and usage is not None and float(usage) != 0
-            else None
-        )
-        return jsonify({"success": True, "available": True, "metrics": result})
-    except Exception as exc:
-        return error_response(exc)
-    finally:
-        if connection:
-            connection.close()
+    return jsonify({
+        "success": True,
+        "available": False,
+        "message": (
+            "The OPS_STAGE contract has no cost-usage table. Use the Azure Cost "
+            "Management usage-billing endpoint for live cost data."
+        ),
+        "metrics": {},
+    })
 
 @app.errorhandler(404)
 def not_found(_error):

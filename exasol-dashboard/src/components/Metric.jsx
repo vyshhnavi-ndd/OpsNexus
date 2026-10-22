@@ -1,4 +1,3 @@
-import React from "react";
 import Card from "./Card";
 import { ArrowUpRight, ArrowDownRight } from "lucide-react";
 export default function Metric({ label, value, hint, icon: Icon, color="green", trend }) {
