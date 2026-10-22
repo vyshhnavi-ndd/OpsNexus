@@ -1,0 +1,3 @@
+dependency_id,upstream_pipeline_id,downstream_pipeline_id,dependency_type,schema_version
+dep_orders_warehouse,pl_orders_ingest,pl_warehouse_refresh,REQUIRED,2.0.0
+dep_finance_warehouse,pl_finance_ingest,pl_warehouse_refresh,REQUIRED,2.0.0

@@ -1,0 +1,680 @@
+{
+  "bundle_id": "opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014",
+  "data_classification": "SYNTHETIC_DEMO_DATA_NOT_LIVE_OPERATIONAL_DATA",
+  "files": [
+    {
+      "format": "csv",
+      "path": "data/data_sources.csv",
+      "row_count": 3,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "data_sources"
+    },
+    {
+      "format": "csv",
+      "path": "data/pipeline_definitions.csv",
+      "row_count": 3,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "pipeline_definitions"
+    },
+    {
+      "format": "csv",
+      "path": "data/pipeline_runs.csv",
+      "row_count": 24,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "pipeline_runs"
+    },
+    {
+      "format": "csv",
+      "path": "data/datasets.csv",
+      "row_count": 3,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "datasets"
+    },
+    {
+      "format": "csv",
+      "path": "data/dataset_observations.csv",
+      "row_count": 22,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "dataset_observations"
+    },
+    {
+      "format": "csv",
+      "path": "data/quality_checks.csv",
+      "row_count": 9,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "quality_checks"
+    },
+    {
+      "format": "csv",
+      "path": "data/quality_results.csv",
+      "row_count": 66,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "quality_results"
+    },
+    {
+      "format": "csv",
+      "path": "data/dependencies.csv",
+      "row_count": 2,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "dependencies"
+    },
+    {
+      "format": "csv",
+      "path": "data/business_kpis.csv",
+      "row_count": 22,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "business_kpis"
+    },
+    {
+      "format": "csv",
+      "path": "data/incident_history.csv",
+      "row_count": 1,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "incident_history"
+    },
+    {
+      "format": "csv",
+      "path": "data/scenario_metadata.csv",
+      "row_count": 8,
+      "scenario_instance_ids": [
+        "case_1df5e590b8fd863ef1b06ec5",
+        "case_2c6d28ecbbfcfc38dc0569f4",
+        "case_37c8a2a10dd59d2afd8a75a5",
+        "case_547b1d1541275f33a3ba374a",
+        "case_6b88ae524aee47b32085db7f",
+        "case_852d39255ebca83b25575f54",
+        "case_aff534fe164d6b7872b6ed70",
+        "case_d060d9e0b4c62478fa63ea47"
+      ],
+      "schema_version": "2.0.0",
+      "table": "scenario_metadata"
+    }
+  ],
+  "generated_at": "2026-10-14T08:00:00Z",
+  "generator_version": "0.2.0",
+  "ground_truth": {
+    "classification": "SYNTHETIC_GROUND_TRUTH_NOT_OPERATIONAL_EVIDENCE",
+    "format": "json",
+    "ingest": false,
+    "path": "ground_truth/expected_outcomes.json"
+  },
+  "manifest_version": "1.0.0",
+  "scenario_count": 8,
+  "scenario_instance_ids": [
+    "case_1df5e590b8fd863ef1b06ec5",
+    "case_2c6d28ecbbfcfc38dc0569f4",
+    "case_37c8a2a10dd59d2afd8a75a5",
+    "case_547b1d1541275f33a3ba374a",
+    "case_6b88ae524aee47b32085db7f",
+    "case_852d39255ebca83b25575f54",
+    "case_aff534fe164d6b7872b6ed70",
+    "case_d060d9e0b4c62478fa63ea47"
+  ],
+  "schema_version": "2.0.0",
+  "schemas": {
+    "business_kpis": {
+      "fields": [
+        {
+          "name": "kpi_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "scenario_instance_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "observation_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "kpi_name",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "domain",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "dataset_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "unit",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "baseline_value",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "name": "observed_value",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "name": "impact_type",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "business_kpis.csv",
+      "primary_key": "kpi_id",
+      "schema_version": "2.0.0"
+    },
+    "data_sources": {
+      "fields": [
+        {
+          "name": "source_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "source_name",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "source_type",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "classification",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "data_sources.csv",
+      "primary_key": "source_id",
+      "schema_version": "2.0.0"
+    },
+    "dataset_observations": {
+      "fields": [
+        {
+          "name": "observation_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "dataset_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "run_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "scenario_instance_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "observed_at",
+          "nullable": false,
+          "type": "timestamp_utc"
+        },
+        {
+          "name": "window_start",
+          "nullable": false,
+          "type": "timestamp_utc"
+        },
+        {
+          "name": "window_end",
+          "nullable": false,
+          "type": "timestamp_utc"
+        },
+        {
+          "name": "row_count",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "name": "expected_row_count",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "name": "freshness_lag_seconds",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "name": "completeness_ratio",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "name": "metric_name",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "metric_value",
+          "nullable": false,
+          "type": "number"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "dataset_observations.csv",
+      "primary_key": "observation_id",
+      "schema_version": "2.0.0"
+    },
+    "datasets": {
+      "fields": [
+        {
+          "name": "dataset_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "dataset_name",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "domain",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "source_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "datasets.csv",
+      "primary_key": "dataset_id",
+      "schema_version": "2.0.0"
+    },
+    "dependencies": {
+      "fields": [
+        {
+          "name": "dependency_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "upstream_pipeline_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "downstream_pipeline_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "dependency_type",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "dependencies.csv",
+      "primary_key": "dependency_id",
+      "schema_version": "2.0.0"
+    },
+    "incident_history": {
+      "fields": [
+        {
+          "name": "incident_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "pipeline_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "scenario_instance_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "occurred_at",
+          "nullable": false,
+          "type": "timestamp_utc"
+        },
+        {
+          "name": "incident_category",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "resolution_status",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "incident_history.csv",
+      "primary_key": "incident_id",
+      "schema_version": "2.0.0"
+    },
+    "pipeline_definitions": {
+      "fields": [
+        {
+          "name": "pipeline_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "pipeline_name",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "source_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "pipeline_definitions.csv",
+      "primary_key": "pipeline_id",
+      "schema_version": "2.0.0"
+    },
+    "pipeline_runs": {
+      "fields": [
+        {
+          "name": "run_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "pipeline_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "scenario_instance_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "status",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "started_at",
+          "nullable": false,
+          "type": "timestamp_utc"
+        },
+        {
+          "name": "ended_at",
+          "nullable": true,
+          "type": "timestamp_utc"
+        },
+        {
+          "name": "duration_seconds",
+          "nullable": true,
+          "type": "integer"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "pipeline_runs.csv",
+      "primary_key": "run_id",
+      "schema_version": "2.0.0"
+    },
+    "quality_checks": {
+      "fields": [
+        {
+          "name": "quality_check_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "dataset_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "check_type",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "description",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "threshold_json",
+          "nullable": false,
+          "type": "json"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "quality_checks.csv",
+      "primary_key": "quality_check_id",
+      "schema_version": "2.0.0"
+    },
+    "quality_results": {
+      "fields": [
+        {
+          "name": "quality_result_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "quality_check_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "observation_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "result",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "measured_value",
+          "nullable": true,
+          "type": "number"
+        },
+        {
+          "name": "expected_value",
+          "nullable": true,
+          "type": "number"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "quality_results.csv",
+      "primary_key": "quality_result_id",
+      "schema_version": "2.0.0"
+    },
+    "scenario_metadata": {
+      "fields": [
+        {
+          "name": "scenario_instance_id",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "scenario_type",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "description",
+          "nullable": false,
+          "type": "string"
+        },
+        {
+          "name": "seed",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "name": "schema_version",
+          "nullable": false,
+          "type": "string"
+        }
+      ],
+      "filename": "scenario_metadata.csv",
+      "primary_key": "scenario_instance_id",
+      "schema_version": "2.0.0"
+    }
+  },
+  "seed": 20261014,
+  "timestamp_convention": "ISO-8601 UTC; Z suffix; second precision"
+}

@@ -1,0 +1,17 @@
+**/.env
+**/.env.*
+!**/.env.example
+**/*.p12
+**/*.pem
+**/*.key
+**/secrets/
+backend/instance/
+backend/.config
+**/.venv/
+**/__pycache__/
+frontend/node_modules/
+**/venv/
+**/node_modules/
+Deployment/*.exe
+git (2).zip
+*.py[cod]

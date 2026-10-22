@@ -1,0 +1,32 @@
+{
+  "checked_row_counts": {
+    "business_kpis": 22,
+    "data_sources": 3,
+    "dataset_observations": 22,
+    "datasets": 3,
+    "dependencies": 2,
+    "incident_history": 1,
+    "pipeline_definitions": 3,
+    "pipeline_runs": 24,
+    "quality_checks": 9,
+    "quality_results": 66,
+    "scenario_metadata": 8
+  },
+  "error_count": 0,
+  "errors": [],
+  "report_version": "1.0.0",
+  "scenario_instance_ids": [
+    "case_1df5e590b8fd863ef1b06ec5",
+    "case_2c6d28ecbbfcfc38dc0569f4",
+    "case_37c8a2a10dd59d2afd8a75a5",
+    "case_547b1d1541275f33a3ba374a",
+    "case_6b88ae524aee47b32085db7f",
+    "case_852d39255ebca83b25575f54",
+    "case_aff534fe164d6b7872b6ed70",
+    "case_d060d9e0b4c62478fa63ea47"
+  ],
+  "schema_version": "2.0.0",
+  "seed": 20261014,
+  "valid": true,
+  "validator_version": "0.2.0"
+}

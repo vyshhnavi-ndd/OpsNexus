@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opsnexus-synthetic-data"
+version = "0.2.0"
+description = "Deterministic synthetic operational data for OpsNexus Module 1"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+opsnexus-synthetic = "opsnexus_synthetic.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["opsnexus_synthetic*"]

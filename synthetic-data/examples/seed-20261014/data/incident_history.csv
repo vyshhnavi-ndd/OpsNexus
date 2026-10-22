@@ -1,0 +1,2 @@
+incident_id,pipeline_id,scenario_instance_id,occurred_at,incident_category,resolution_status,schema_version
+inc_opsnexus-synthetic-v0.2.0-schema-2.0.0-seed-20261014_case_2c6d28ecbbfcfc38dc0569f4_prior_001,pl_orders_ingest,case_2c6d28ecbbfcfc38dc0569f4,2026-10-07T08:00:24Z,FRESHNESS_DELAY,CLOSED,2.0.0

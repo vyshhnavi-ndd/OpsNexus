@@ -1,0 +1,10 @@
+quality_check_id,dataset_id,check_type,description,threshold_json,schema_version
+qc_ds_orders_freshness,ds_orders,freshness,Maximum freshness lag in seconds,"{""max_lag_seconds"":3600}",2.0.0
+qc_ds_orders_completeness,ds_orders,completeness,Minimum expected row completeness,"{""min_ratio"":0.95}",2.0.0
+qc_ds_orders_metric_range,ds_orders,metric_range,Maximum relative metric deviation from 100,"{""baseline"":100,""max_relative_deviation"":0.2}",2.0.0
+qc_ds_inventory_freshness,ds_inventory,freshness,Maximum freshness lag in seconds,"{""max_lag_seconds"":3600}",2.0.0
+qc_ds_inventory_completeness,ds_inventory,completeness,Minimum expected row completeness,"{""min_ratio"":0.95}",2.0.0
+qc_ds_inventory_metric_range,ds_inventory,metric_range,Maximum relative metric deviation from 100,"{""baseline"":100,""max_relative_deviation"":0.2}",2.0.0
+qc_ds_finance_freshness,ds_finance,freshness,Maximum freshness lag in seconds,"{""max_lag_seconds"":3600}",2.0.0
+qc_ds_finance_completeness,ds_finance,completeness,Minimum expected row completeness,"{""min_ratio"":0.95}",2.0.0
+qc_ds_finance_metric_range,ds_finance,metric_range,Maximum relative metric deviation from 100,"{""baseline"":100,""max_relative_deviation"":0.2}",2.0.0
