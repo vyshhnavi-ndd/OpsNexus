@@ -24,19 +24,25 @@ from datetime import date, timedelta
 from flask import jsonify, request
 from azure.identity import ClientSecretCredential
 
-# Cost data is cached for 6 hours.
+# Azure Cost Management is heavily throttled. Cache successful cost queries and
+# avoid repeatedly hitting Azure when it has returned HTTP 429.
 COST_CACHE_TTL = 6 * 60 * 60
-
-# Fallback wait if Azure does not provide a retry interval.
 COST_RATE_LIMIT_WAIT = 15 * 60
+USAGE_BILLING_CACHE_TTL = 60
 
 _cost_cache = {
     "data": None,
     "expires_at": 0,
-    "blocked_until": 0
+    "blocked_until": 0,
 }
-
 _cost_lock = threading.Lock()
+
+# Separate cache for daily cost data used by /api/metrics/usage-billing.
+# Keep stale successful data available as a fallback during Azure throttling.
+_daily_cost_cache = {}
+_daily_cost_lock = threading.Lock()
+_usage_billing_cache = {}
+_usage_billing_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -143,11 +149,32 @@ CORS(app, resources={
 # ============================================================
 
 def fetch_daily_cost(access_token, start_date, end_date):
+    """Fetch daily Azure costs, caching successful results and respecting 429s.
+
+    A successful result is cached for COST_CACHE_TTL. If Azure throttles a
+    refresh, previously fetched values for the same date range are returned
+    when available; otherwise the HTTP error is raised to the route handler.
+    """
+    cache_key = (start_date.isoformat(), end_date.isoformat())
+    now = time.time()
+
+    with _daily_cost_lock:
+        cached = _daily_cost_cache.get(cache_key)
+        if cached and now < cached["expires_at"]:
+            app.logger.info("Using cached Azure daily cost data for %s to %s", *cache_key)
+            return dict(cached["data"])
+        if cached and now < cached.get("blocked_until", 0):
+            if cached.get("data") is not None:
+                return dict(cached["data"])
+            wait_left = max(1, int(cached["blocked_until"] - now))
+            raise requests.HTTPError(
+                f"Azure Cost Management is rate-limited; retry in about {wait_left} seconds."
+            )
+
     url = (
         f"{ARM}/subscriptions/{SUBSCRIPTION_ID}"
         "/providers/Microsoft.CostManagement/query"
     )
-
     payload = {
         "type": "ActualCost",
         "timeframe": "Custom",
@@ -158,10 +185,7 @@ def fetch_daily_cost(access_token, start_date, end_date):
         "dataset": {
             "granularity": "Daily",
             "aggregation": {
-                "totalCost": {
-                    "name": "PreTaxCost",
-                    "function": "Sum",
-                }
+                "totalCost": {"name": "PreTaxCost", "function": "Sum"}
             },
         },
     }
@@ -177,11 +201,39 @@ def fetch_daily_cost(access_token, start_date, end_date):
         timeout=60,
     )
 
+    if response.status_code == 429:
+        retry_after = (
+            response.headers.get("Retry-After")
+            or response.headers.get("x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after")
+            or response.headers.get("x-ms-ratelimit-microsoft.consumption-retry-after")
+        )
+        try:
+            wait_seconds = max(60, int(float(retry_after)))
+        except (TypeError, ValueError):
+            wait_seconds = COST_RATE_LIMIT_WAIT
+
+        app.logger.warning(
+            "Azure Cost Management throttled this request (429); next attempt should wait %s seconds",
+            wait_seconds,
+        )
+        with _daily_cost_lock:
+            cached = _daily_cost_cache.get(cache_key)
+            if cached:
+                cached["blocked_until"] = time.time() + wait_seconds
+                app.logger.warning("Serving stale cached daily cost data after Azure 429")
+                return dict(cached["data"])
+            _daily_cost_cache[cache_key] = {
+                "data": None,
+                "expires_at": 0,
+                "blocked_until": time.time() + wait_seconds,
+            }
+        response.raise_for_status()
+
     if not response.ok:
         app.logger.error(
             "Azure billing API returned HTTP %s: %s",
             response.status_code,
-            response.text,
+            response.text[:2000],
         )
         response.raise_for_status()
 
@@ -189,28 +241,16 @@ def fetch_daily_cost(access_token, start_date, end_date):
     properties = result.get("properties", {})
     columns = properties.get("columns", [])
     rows = properties.get("rows", [])
-
-    column_names = [
-        column.get("name", "")
-        for column in columns
-    ]
+    column_names = [column.get("name", "") for column in columns]
 
     date_column = next(
-        (
-            name for name in column_names
-            if name.lower() in ("usagedate", "date")
-        ),
+        (name for name in column_names if name.lower() in ("usagedate", "date")),
         None,
     )
-
     cost_column = next(
-        (
-            name for name in column_names
-            if name.lower() in ("pretaxcost", "cost", "totalcost")
-        ),
+        (name for name in column_names if name.lower() in ("pretaxcost", "cost", "totalcost")),
         None,
     )
-
     if date_column is None or cost_column is None:
         raise ValueError(
             "Unexpected Azure Cost Management response columns: "
@@ -219,31 +259,26 @@ def fetch_daily_cost(access_token, start_date, end_date):
 
     date_index = column_names.index(date_column)
     cost_index = column_names.index(cost_column)
-
     daily_costs = {}
-
     for row in rows:
         if len(row) <= max(date_index, cost_index):
             continue
-
-        raw_date = row[date_index]
-        raw_cost = row[cost_index]
-
+        raw_date, raw_cost = row[date_index], row[cost_index]
         if raw_date is None or raw_cost is None:
             continue
-
         date_text = str(raw_date)
-
         if len(date_text) == 8 and date_text.isdigit():
-            day = (
-                f"{date_text[:4]}-{date_text[4:6]}-"
-                f"{date_text[6:8]}"
-            )
+            day = f"{date_text[:4]}-{date_text[4:6]}-{date_text[6:8]}"
         else:
             day = date.fromisoformat(date_text[:10]).isoformat()
-
         daily_costs[day] = daily_costs.get(day, 0.0) + float(raw_cost)
 
+    with _daily_cost_lock:
+        _daily_cost_cache[cache_key] = {
+            "data": dict(daily_costs),
+            "expires_at": time.time() + COST_CACHE_TTL,
+            "blocked_until": 0,
+        }
     return daily_costs
 
 
@@ -996,6 +1031,14 @@ def usage_billing():
 
         end_date = datetime.now(timezone.utc).date()
         start_date = end_date - timedelta(days=days - 1)
+        cache_key = (days, end_date.isoformat())
+        now = time.time()
+        with _usage_billing_lock:
+            cached_response = _usage_billing_cache.get(cache_key)
+            if cached_response and now < cached_response["expires_at"]:
+                payload = dict(cached_response["payload"])
+                payload["cached"] = True
+                return jsonify(payload), 200
 
         token = get_azure_token()
         errors = {}
@@ -1205,7 +1248,7 @@ def usage_billing():
             for row in daily
         )
 
-        return jsonify({
+        response_payload = {
             "success": (
                 billing_status == "working"
                 and pipeline_status == "working"
@@ -1241,7 +1284,16 @@ def usage_billing():
                 "Confirm the returned billing currency before treating "
                 "amounts as INR."
             ),
-        }), 200
+        }
+        # Cache only fully successful responses. A partial/error response must
+        # not replace the last known good dashboard response.
+        if response_payload["success"]:
+            with _usage_billing_lock:
+                _usage_billing_cache[cache_key] = {
+                    "payload": response_payload,
+                    "expires_at": time.time() + USAGE_BILLING_CACHE_TTL,
+                }
+        return jsonify(response_payload), 200
 
     except Exception as exc:
         app.logger.exception(
