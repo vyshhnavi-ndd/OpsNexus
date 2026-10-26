@@ -225,25 +225,28 @@ export default function App() {
       if (trustResult.status === "fulfilled") {
         const payload = trustResult.value.data;
 
-        if (payload && payload.success !== false) {
-          const trustData =
-            payload.metrics ??
-            payload.trust_metrics ??
-            payload.data?.metrics ??
-            payload.data ??
-            payload;
+        const trustData =
+          payload?.metrics ??
+          payload?.trust_metrics ??
+          payload?.data?.metrics ??
+          payload?.data ??
+          payload;
+
+        if (trustData && typeof trustData === "object") {
+          console.log("Trust API response:", payload);
+          console.log("Trust metrics passed to component:", trustData);
 
           setTrustMetrics(trustData);
-        } else {
-          console.error("Trust API returned an unsuccessful response:", payload);
         }
       } else {
         console.error(
           "Trust API request failed:",
-          getErrorMessage(trustResult.reason, "Unable to load trust metrics.")
+          getErrorMessage(
+            trustResult.reason,
+            "Unable to load trust metrics."
+          )
         );
       }
-
       if (
         costResult.status === "fulfilled" &&
         (costResult.value.data?.success !== false)
@@ -308,7 +311,7 @@ export default function App() {
   const refreshAll = useCallback(async () => {
     await Promise.all([loadPlatformData(), loadAdfRuns()]);
   }, [loadPlatformData, loadAdfRuns]);
-  
+
 
   useEffect(() => {
     loadPlatformData();

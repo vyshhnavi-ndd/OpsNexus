@@ -1,12 +1,12 @@
-
-import React from "react";
+import React, { useMemo } from "react";
 import Card from "./Card";
 import SectionTitle from "./SectionTitle";
 import Badge from "./Badge";
 
 const number = (value, digits = 0) => {
   if (
-    value == null ||
+    value === null ||
+    value === undefined ||
     value === "" ||
     !Number.isFinite(Number(value))
   ) {
@@ -19,14 +19,19 @@ const number = (value, digits = 0) => {
 };
 
 const percent = (value, digits = 2) => {
-  if (value == null || !Number.isFinite(Number(value))) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    !Number.isFinite(Number(value))
+  ) {
     return "—";
   }
 
   return `${number(value, digits)}%`;
 };
 
-function MetricCard({ label, value, color = "blue", description }) {
+function MetricCard({ label, value, color, description }) {
   return (
     <div className={`trust-summary-card trust-${color}`}>
       <div className="trust-summary-heading">
@@ -60,11 +65,11 @@ function QualityBar({ label, value, total }) {
       : null;
 
   const width =
-    count != null && total > 0
+    count !== null && total > 0
       ? Math.min(100, (count / total) * 100)
       : 0;
 
-  const invalid = /invalid|reject|fail|mismatch/i.test(label);
+  const isInvalid = /invalid|reject|fail|mismatch/i.test(label);
 
   return (
     <div className="trust-quality-item">
@@ -83,7 +88,7 @@ function QualityBar({ label, value, total }) {
       >
         <div
           className={`trust-quality-fill ${
-            invalid ? "invalid" : "valid"
+            isInvalid ? "invalid" : "valid"
           }`}
           style={{ width: `${width}%` }}
         />
@@ -92,131 +97,127 @@ function QualityBar({ label, value, total }) {
   );
 }
 
-function QualityChart({ title, subtitle, items, total }) {
-  return (
-    <Card>
-      <SectionTitle title={title} subtitle={subtitle} />
+function normalizeMetrics(input) {
+  let result = input;
 
-      <div className="trust-quality-chart">
-        {items.map((item) => (
-          <QualityBar
-            key={item.label}
-            label={item.label}
-            value={item.value}
-            total={total}
-          />
-        ))}
-      </div>
+  // Support direct responses and common Flask response wrappers.
+  for (let i = 0; i < 4; i += 1) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      return {};
+    }
 
-      <div className="trust-chart-total">
-        Total records: {number(total)}
-      </div>
-    </Card>
-  );
+    if (
+      result.total_records !== undefined ||
+      result.valid_records !== undefined ||
+      result.trust_score !== undefined
+    ) {
+      return result;
+    }
+
+    if (result.trust_metrics && typeof result.trust_metrics === "object") {
+      result = result.trust_metrics;
+    } else if (result.metrics && typeof result.metrics === "object") {
+      result = result.metrics;
+    } else if (result.data && typeof result.data === "object") {
+      result = result.data;
+    } else {
+      return result;
+    }
+  }
+
+  return result || {};
 }
 
 export default function TrustCard({ metrics = {} }) {
-  const total = Number(metrics.total_records) || 0;
-  const valid = Number(metrics.valid_records) || 0;
-  const invalid = Number(metrics.invalid_records) || 0;
+  const data = useMemo(() => normalizeMetrics(metrics), [metrics]);
 
-  // Prefer backend values; calculate rates only when counts are available.
+  const total = data.total_records ?? null;
+  const valid = data.valid_records ?? null;
+  const invalid = data.invalid_records ?? null;
+
+  // Use the backend's trust score when available.
   const trustScore =
-    metrics.trust_score != null
-      ? Number(metrics.trust_score)
-      : total > 0
-        ? (valid / total) * 100
+    data.trust_score != null
+      ? Number(data.trust_score)
+      : total != null && Number(total) > 0 && valid != null
+        ? (Number(valid) / Number(total)) * 100
         : null;
 
   const validationRate =
-    total > 0 ? (valid / total) * 100 : null;
+    total != null && Number(total) > 0 && valid != null
+      ? (Number(valid) / Number(total)) * 100
+      : null;
 
   const invalidRate =
-    total > 0 ? (invalid / total) * 100 : null;
+    total != null && Number(total) > 0 && invalid != null
+      ? (Number(invalid) / Number(total)) * 100
+      : null;
 
   const rejectionRate =
-    metrics.rejection_rate != null
-      ? Number(metrics.rejection_rate)
+    data.rejection_rate != null
+      ? Number(data.rejection_rate)
       : invalidRate;
 
-  const status = metrics.status || "UNKNOWN";
+  const status = data.status || "UNKNOWN";
 
-  // Do not render metrics that have no actual values.
   const optionalMetrics = [
     {
       label: "Average Completeness",
-      value: metrics.avg_completeness,
-      format: (v) => percent(v),
+      value: data.avg_completeness,
+      format: (value) => percent(value),
     },
     {
       label: "Financial Mismatches",
-      value: metrics.financial_mismatches,
-      format: (v) => number(v),
+      value: data.financial_mismatches,
+      format: (value) => number(value),
     },
     {
       label: "Accuracy Failures",
-      value: metrics.accuracy_failures,
-      format: (v) => number(v),
+      value: data.accuracy_failures,
+      format: (value) => number(value),
     },
     {
       label: "Correctness Failures",
-      value: metrics.correctness_failures,
-      format: (v) => number(v),
+      value: data.correctness_failures,
+      format: (value) => number(value),
     },
     {
       label: "Missing IDs",
-      value: metrics.missing_ids,
-      format: (v) => number(v),
+      value: data.missing_ids,
+      format: (value) => number(value),
     },
     {
       label: "Reported Amount at Risk",
-      value: metrics.reported_total_at_risk,
-      format: (v) => number(v, 2),
+      value: data.reported_total_at_risk,
+      format: (value) => number(value, 2),
     },
   ].filter(
     (item) =>
-      item.value != null &&
+      item.value !== null &&
+      item.value !== undefined &&
       item.value !== "" &&
       Number.isFinite(Number(item.value))
   );
 
-  const recordChart = [
-    { label: "Valid Rows", value: valid },
-    { label: "Invalid Rows", value: invalid },
-  ];
+  // Your API provides charts.record_distribution.
+  const distribution =
+    Array.isArray(data.charts?.record_distribution)
+      ? data.charts.record_distribution
+      : [
+          { label: "Valid", value: valid },
+          { label: "Invalid", value: invalid },
+        ];
 
-  const financialChart = Array.isArray(
-    metrics.charts?.financial_quality
-  )
-    ? metrics.charts.financial_quality.filter(
-        (item) =>
-          item.value != null &&
-          Number.isFinite(Number(item.value))
-      )
-    : [];
+  const chartItems = distribution.filter(
+    (item) =>
+      item.value !== null &&
+      item.value !== undefined &&
+      Number.isFinite(Number(item.value))
+  );
 
   return (
     <div className="trust-dashboard">
-      {/* Page heading */}
-      <div className="trust-page-heading">
-        <div>
-          <span className="trust-eyebrow">WORKSPACE / DATAOPS</span>
-          <h2>Data Trust</h2>
-          <p>
-            Review trust metrics and the live Exasol data quality status.
-          </p>
-        </div>
-
-        <button
-          type="button"
-          className="trust-action-button"
-          onClick={() => window.location.reload()}
-        >
-          ↻ Refresh
-        </button>
-      </div>
-
-      {/* KPI row */}
+      {/* Heading */}
       <div className="trust-summary-grid">
         <MetricCard
           label="Raw Data / Total Records"
@@ -241,13 +242,13 @@ export default function TrustCard({ metrics = {} }) {
 
         <MetricCard
           label="Data Quality / Trust Score"
-          value={percent(trustScore, 2)}
+          value={percent(trustScore)}
           color="purple"
-          description="Valid records as a share of total"
+          description="Trust score returned by the backend"
         />
       </div>
 
-      {/* Derived KPI row */}
+      {/* Derived metrics */}
       <div className="trust-summary-grid trust-secondary-grid">
         <MetricCard
           label="Validation Rate"
@@ -267,7 +268,7 @@ export default function TrustCard({ metrics = {} }) {
           label="Rejection Rate"
           value={percent(rejectionRate)}
           color="orange"
-          description="Reported by the backend"
+          description="Rejection rate returned by the backend"
         />
       </div>
 
@@ -276,7 +277,7 @@ export default function TrustCard({ metrics = {} }) {
         <SectionTitle
           title="Dataset Trust Overview"
           subtitle={`Source: ${
-            metrics.source || "Exasol data quality records"
+            data.source || "Exasol data quality records"
           }`}
         />
 
@@ -293,9 +294,9 @@ export default function TrustCard({ metrics = {} }) {
               role="progressbar"
               aria-label="Dataset trust score"
               aria-valuenow={
-                Number.isFinite(trustScore)
-                  ? Math.min(100, Math.max(0, trustScore))
-                  : 0
+                trustScore == null
+                  ? 0
+                  : Math.min(100, Math.max(0, trustScore))
               }
               aria-valuemin={0}
               aria-valuemax={100}
@@ -304,9 +305,9 @@ export default function TrustCard({ metrics = {} }) {
                 className="trust-progress-fill"
                 style={{
                   width: `${
-                    Number.isFinite(trustScore)
-                      ? Math.min(100, Math.max(0, trustScore))
-                      : 0
+                    trustScore == null
+                      ? 0
+                      : Math.min(100, Math.max(0, trustScore))
                   }%`,
                 }}
               />
@@ -330,27 +331,22 @@ export default function TrustCard({ metrics = {} }) {
             label="Total Records"
             value={number(total)}
           />
-
           <DetailMetric
             label="Valid Records"
             value={number(valid)}
           />
-
           <DetailMetric
             label="Invalid Records"
             value={number(invalid)}
           />
-
           <DetailMetric
             label="Trust Score"
             value={percent(trustScore)}
           />
-
           <DetailMetric
             label="Validation Rate"
             value={percent(validationRate)}
           />
-
           <DetailMetric
             label="Rejection Rate"
             value={percent(rejectionRate)}
@@ -358,7 +354,30 @@ export default function TrustCard({ metrics = {} }) {
         </div>
       </Card>
 
-      {/* Only show actual, available validation metrics */}
+      {/* Record distribution chart */}
+      <Card>
+        <SectionTitle
+          title="Record Distribution"
+          subtitle="Valid and invalid records returned by Exasol"
+        />
+
+        <div className="trust-quality-chart">
+          {chartItems.map((item) => (
+            <QualityBar
+              key={item.label}
+              label={item.label}
+              value={item.value}
+              total={Number(total) || 0}
+            />
+          ))}
+        </div>
+
+        <div className="trust-chart-total">
+          Total records: {number(total)}
+        </div>
+      </Card>
+
+      {/* Additional non-null metrics only */}
       {optionalMetrics.length > 0 && (
         <Card>
           <SectionTitle
