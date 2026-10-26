@@ -358,25 +358,6 @@ export default function TrustCard({ metrics = {} }) {
         </div>
       </Card>
 
-      {/* Charts */}
-      <div className="trust-chart-grid">
-        <QualityChart
-          title="Record Distribution"
-          subtitle="Valid versus invalid records"
-          items={recordChart}
-          total={total}
-        />
-
-        {financialChart.length > 0 && (
-          <QualityChart
-            title="Financial Quality"
-            subtitle="Financial validation results reported by Exasol"
-            items={financialChart}
-            total={total}
-          />
-        )}
-      </div>
-
       {/* Only show actual, available validation metrics */}
       {optionalMetrics.length > 0 && (
         <Card>
