@@ -21,6 +21,61 @@
     transform: rotate(360deg);
   }
 }
+/* PipelineTable.css — styles for the pipeline table and failure diagnostics */
+.pipeline-table-card{position:relative;background:var(--card,#fff);border:1px solid #e5e7eb;border-radius:16px;padding:20px;color:var(--text,#172033);box-shadow:0 8px 24px rgba(15,23,42,.04)}
+.pipeline-table-toolbar,.activity-panel-heading,.pipeline-failure-alert-heading,.pipeline-failure-alert-item,.failure-action-row,.diagnostic-title{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.pipeline-table-toolbar h2,.activity-panel-heading h3,.pipeline-failure-alert h3,.diagnostic-title h4{margin:0;font-size:18px}
+.pipeline-table-toolbar p,.activity-panel-heading p,.pipeline-failure-alert-heading p,.diagnostic-title p,.failure-action-row p{margin:5px 0 0;color:#64748b;font-size:13px}
+.pipeline-refresh,.pipeline-expand,.explain-button{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid #d7deea;background:#fff;color:#24324a;border-radius:9px;padding:9px 12px;font-weight:600;cursor:pointer}
+.pipeline-refresh:disabled,.explain-button:disabled{opacity:.6;cursor:wait}
+.pipeline-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:20px 0}
+.pipeline-search{display:flex;align-items:center;gap:8px;border:1px solid #d7deea;border-radius:9px;padding:0 10px;min-width:260px;flex:1}
+.pipeline-search input{width:100%;border:0;outline:0;padding:10px 0;background:transparent;color:inherit}
+.pipeline-filters select{padding:10px;border:1px solid #d7deea;border-radius:9px;background:#fff;color:#24324a}
+.pipeline-result-count{font-size:12px;color:#64748b;white-space:nowrap}
+.pipeline-table-scroll{width:100%;overflow:auto}
+.pipeline-table{border-collapse:collapse;width:100%;font-size:13px;min-width:850px}
+.pipeline-table th{background:#f8fafc;text-align:left;color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:.045em;font-weight:700}
+.pipeline-table th,.pipeline-table td{padding:12px;border-bottom:1px solid #e9edf3;vertical-align:top}
+.pipeline-table td strong{display:block}
+.pipeline-run-id,.pipeline-trigger-name{display:block;margin-top:4px;color:#64748b;font-size:11px;overflow-wrap:anywhere}
+.run-status{display:inline-flex;border-radius:99px;padding:4px 8px;font-size:11px;font-weight:700;background:#f1f5f9;color:#475569;white-space:nowrap}
+.run-status.success{background:#dcfce7;color:#166534}.run-status.failed{background:#fee2e2;color:#b91c1c}.run-status.running{background:#dbeafe;color:#1d4ed8}.run-status.cancelled{background:#fef3c7;color:#92400e}
+.trigger-chip{display:inline-flex;align-items:center;gap:5px;color:#475569}
+.pipeline-duration{white-space:nowrap;font-variant-numeric:tabular-nums}
+.pipeline-detail-row>td{background:#fbfcfe;padding:0!important}
+.pipeline-activity-panel{padding:20px;display:grid;gap:16px}
+.activity-panel-heading{padding-bottom:12px;border-bottom:1px solid #e5eaf1}
+.pipeline-error{display:flex;gap:8px;align-items:flex-start;padding:11px 12px;border:1px solid #fecaca;border-radius:9px;background:#fff1f2;color:#9f1239;font-size:13px;overflow-wrap:anywhere}
+.pipeline-failure-alert{margin:16px 0;padding:16px;border:1px solid #fecaca;border-radius:12px;background:#fffafa}
+.pipeline-failure-alert-heading{justify-content:flex-start;color:#b91c1c;margin-bottom:12px}
+.pipeline-failure-alert-list{display:grid;gap:10px}
+.pipeline-failure-alert-item{align-items:flex-start;padding:12px;background:#fff;border:1px solid #fee2e2;border-radius:9px}
+.pipeline-failure-alert-item p{margin:7px 0;color:#475569;font-size:13px;overflow-wrap:anywhere}
+.pipeline-failure-alert-item small{color:#64748b}
+.failure-action-row{padding:14px;border:1px solid #fecaca;background:#fff7f7;border-radius:10px;align-items:center}
+.failure-action-row strong{color:#991b1b}
+.explain-button{background:#1d4ed8;color:#fff;border-color:#1d4ed8;white-space:nowrap}
+.explain-button.small{padding:6px 8px;margin-top:7px;font-size:11px}
+.diagnostic-preview{border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;background:#fff}
+.diagnostic-title{padding:14px 16px;background:#f8fafc;border-bottom:1px solid #e2e8f0}
+.diagnostic-title h4{font-size:15px}.diagnostic-title p{max-width:760px;line-height:1.5}
+.diagnostic-tag{font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:800;border:1px solid #cbd5e1;border-radius:99px;padding:5px 8px;color:#475569;white-space:nowrap}
+.diagnostic-table{border-collapse:collapse;width:100%;font-size:13px}
+.diagnostic-table th,.diagnostic-table td{padding:11px 14px;border-bottom:1px solid #edf0f4;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.diagnostic-table thead th{background:#f1f5f9;color:#475569;font-size:11px;text-transform:uppercase}
+.diagnostic-table tbody th{width:190px;color:#475569;background:#fcfcfd;font-weight:700}
+.diagnostic-table tr:last-child th,.diagnostic-table tr:last-child td{border-bottom:0}
+.pipeline-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:28px;color:#64748b;text-align:center}
+.pipeline-table-footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#64748b;font-size:11px;padding-top:14px}
+.pipeline-table-footer span{display:inline-flex;align-items:center;gap:6px}
+.pipeline-parameters summary{cursor:pointer;color:#334155;font-weight:600}.pipeline-parameters pre{max-height:300px;overflow:auto;padding:12px;background:#0f172a;color:#e2e8f0;border-radius:8px;font-size:12px}
+.toast-stack{position:fixed;right:22px;top:20px;z-index:9999;display:grid;gap:10px;width:min(380px,calc(100vw - 32px));pointer-events:none}
+.pipeline-toast{pointer-events:auto;display:flex;align-items:flex-start;gap:10px;padding:13px 14px;border-radius:12px;background:#fff;border:1px solid #fecaca;color:#991b1b;box-shadow:0 14px 40px rgba(15,23,42,.18);font-size:13px;animation:toast-in .2s ease-out}
+.pipeline-toast span{flex:1;overflow-wrap:anywhere}.pipeline-toast button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0}
+.pipeline-toast.success{border-color:#bbf7d0;color:#166534}
+.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@keyframes toast-in{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:700px){.pipeline-table-card{padding:12px}.pipeline-table-toolbar,.failure-action-row,.diagnostic-title{align-items:flex-start;flex-direction:column}.pipeline-search{min-width:100%}.diagnostic-table tbody th{width:120px}.pipeline-table-footer{flex-direction:column}}
 
 /* Pipeline history controls */
 .pipeline-history-controls {
