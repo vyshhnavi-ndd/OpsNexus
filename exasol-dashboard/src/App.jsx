@@ -308,6 +308,7 @@ export default function App() {
   const refreshAll = useCallback(async () => {
     await Promise.all([loadPlatformData(), loadAdfRuns()]);
   }, [loadPlatformData, loadAdfRuns]);
+  
 
   useEffect(() => {
     loadPlatformData();
@@ -791,45 +792,6 @@ export default function App() {
           {page === "trust" && (
             <>
               <TrustCard metrics={trustMetrics || {}} />
-
-              <Card className="table-card">
-                <SectionTitle
-                  title="Exasol schema inventory"
-                  subtitle={`Tables discovered for schema ${schema}`}
-                />
-
-                {tableList.length > 0 ? (
-                  <div className="table-scroll">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Table</th>
-                          <th>Schema</th>
-                          <th>Type</th>
-                        </tr>
-                      </thead>
-
-                      <tbody>
-                        {tableList.map((table, index) => (
-                          <tr
-                            key={`${table.table_schema}-${table.table_name}-${index}`}
-                          >
-                            <td>
-                              <strong>{table.table_name || "—"}</strong>
-                            </td>
-                            <td>{table.table_schema || schema}</td>
-                            <td>{table.table_type || "Table"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="pipeline-state">
-                    No live schema inventory is available.
-                  </div>
-                )}
-              </Card>
             </>
           )}
 
