@@ -8,7 +8,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+<<<<<<< HEAD
 import math
+=======
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 import pyexasol
 from pyexasol.exceptions import ExaAuthError
 from flask import Flask, jsonify, request
@@ -53,6 +56,7 @@ frontend_origins = [
     for origin in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")
     if origin.strip()
 ]
+<<<<<<< HEAD
 CORS(
     app,
     resources={
@@ -68,6 +72,9 @@ CORS(
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+=======
+CORS(app, resources={r"/api/*": {"origins": frontend_origins}})
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 
 EXASOL_HOST = os.getenv("EXASOL_HOST", "127.0.0.1").strip()
 EXASOL_PORT = int(os.getenv("EXASOL_PORT", "8563"))
@@ -414,6 +421,7 @@ def fetch_pipeline_runs(token, start_date, end_date):
     return runs
 
 
+<<<<<<< HEAD
 def load_adf_pipeline_id_map():
     """Load optional ADF-name -> EXISTING pipeline ID mappings from .env.
 
@@ -979,6 +987,9 @@ def sync_adf_pipelines_to_exasol():
         if connection is not None:
             connection.close()
 #===========
+=======
+# ============================================================
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 # USAGE & BILLING DASHBOARD API
 # GET /api/metrics/usage-billing?days=30
 # ============================================================
@@ -2776,6 +2787,7 @@ def pipeline_metrics():
             connection.close()
 
 
+<<<<<<< HEAD
 @app.route("/api/trust/metrics", methods=["GET"])
 def get_trust_metrics():
     """
@@ -2865,15 +2877,166 @@ def get_trust_metrics():
         if connection is not None:
             connection.close()
 
+=======
+@app.get("/api/metrics/trust")
+def trust_metrics():
+    connection = None
+    try:
+        connection = get_connection()
+        available = metadata_tables(connection, EXASOL_SCHEMA)
+        result = {"available": True, "tables": {}}
+        qschema = quote_identifier(EXASOL_SCHEMA)
+        names = [row["table_name"].upper() for row in available]
+
+        if "TRUST_SCORES" in names:
+            columns = metadata_columns(connection, EXASOL_SCHEMA, "TRUST_SCORES")
+            column_names = [row["column_name"].upper() for row in columns]
+            score_col = first_existing(column_names, "TRUST_SCORE", "SCORE")
+            if score_col:
+                qtable = quote_identifier("TRUST_SCORES")
+                qscore = quote_identifier(score_col)
+                rows = query_rows(
+                    connection,
+                    f"""
+                    SELECT
+                        AVG({qscore}) AS AVG_TRUST_SCORE,
+                        MIN({qscore}) AS MIN_TRUST_SCORE,
+                        MAX({qscore}) AS MAX_TRUST_SCORE,
+                        COUNT(*) AS TOTAL_RECORDS
+                    FROM {qschema}.{qtable}
+                    """,
+                )
+                result["tables"]["trust_scores"] = rows[0] if rows else {}
+
+        if "DATA_QUALITY_RESULTS" in names:
+            qtable = quote_identifier("DATA_QUALITY_RESULTS")
+            total_rows = query_rows(
+                connection,
+                f"SELECT COUNT(*) AS TOTAL FROM {qschema}.{qtable}",
+            )
+            quality_result = {
+                "total_checks": total_rows[0]["total"] if total_rows else 0
+            }
+            columns = metadata_columns(connection, EXASOL_SCHEMA, "DATA_QUALITY_RESULTS")
+            column_names = [row["column_name"].upper() for row in columns]
+            status_col = first_existing(column_names, "STATUS", "RESULT_STATUS")
+            if status_col:
+                groups = count_by_status(
+                    connection, EXASOL_SCHEMA, "DATA_QUALITY_RESULTS", status_col
+                )
+                quality_result["status_breakdown"] = {
+                    row["status"] or "UNKNOWN": row["total"] for row in groups
+                }
+            result["tables"]["quality_results"] = quality_result
+
+        if not result["tables"]:
+            result.update({
+                "available": False,
+                "message": (
+                    "Neither TRUST_SCORES nor DATA_QUALITY_RESULTS exists "
+                    "in the configured schema, or no compatible score column was found."
+                ),
+            })
+
+        return jsonify({"success": True, "metrics": result})
+    except Exception as exc:
+        return error_response(exc)
+    finally:
+        if connection:
+            connection.close()
+
+
+@app.get("/api/metrics/cost")
+def cost_metrics():
+    connection = None
+    try:
+        connection = get_connection()
+        available = metadata_tables(connection, EXASOL_SCHEMA)
+        if not table_exists(available, "COST_USAGE_HISTORY"):
+            return jsonify({
+                "success": True,
+                "available": False,
+                "message": "COST_USAGE_HISTORY does not exist in the configured schema.",
+                "metrics": {},
+            })
+
+        columns = metadata_columns(connection, EXASOL_SCHEMA, "COST_USAGE_HISTORY")
+        column_names = [row["column_name"].upper() for row in columns]
+        qschema = quote_identifier(EXASOL_SCHEMA)
+        qtable = quote_identifier("COST_USAGE_HISTORY")
+        cost_col = first_existing(column_names, "COST_AMOUNT", "COST")
+        usage_col = first_existing(column_names, "USAGE_UNITS", "USAGE")
+        result = {}
+
+        if cost_col:
+            qcost = quote_identifier(cost_col)
+            rows = query_rows(
+                connection,
+                f"""
+                SELECT
+                    SUM({qcost}) AS TOTAL_COST,
+                    AVG({qcost}) AS AVG_COST,
+                    COUNT(*) AS RECORD_COUNT
+                FROM {qschema}.{qtable}
+                """,
+            )
+            if rows:
+                result.update(rows[0])
+
+        if usage_col:
+            qusage = quote_identifier(usage_col)
+            rows = query_rows(
+                connection,
+                f"""
+                SELECT
+                    SUM({qusage}) AS TOTAL_USAGE,
+                    AVG({qusage}) AS AVG_USAGE
+                FROM {qschema}.{qtable}
+                """,
+            )
+            if rows:
+                result.update(rows[0])
+
+        cost = result.get("total_cost")
+        usage = result.get("total_usage")
+        result["cost_per_usage_unit"] = (
+            float(cost) / float(usage)
+            if cost is not None and usage is not None and float(usage) != 0
+            else None
+        )
+        return jsonify({"success": True, "available": True, "metrics": result})
+    except Exception as exc:
+        return error_response(exc)
+    finally:
+        if connection:
+            connection.close()
+
+@app.errorhandler(404)
+def not_found(_error):
+    return jsonify({
+        "success": False,
+        "error": {"code": "NOT_FOUND", "message": "Endpoint not found."},
+    }), 404
+
+
+# ==================== RAG API CONFIGURATION ====================
+
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 import os
 import re
 import json
 import requests
+<<<<<<< HEAD
 from uuid import uuid4
 
 from flask import request, jsonify
 
 
+=======
+
+from flask import request, jsonify
+
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 OLLAMA_URL = os.getenv(
     "OLLAMA_URL", "http://127.0.0.1:11434"
 ).rstrip("/")
@@ -2882,8 +3045,13 @@ OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL", "llama3:latest"
 )
 OLLAMA_BASE_URL = os.getenv(
+<<<<<<< HEAD
     "OLLAMA_BASE_URL", OLLAMA_URL
 ).rstrip("/")
+=======
+    "OLLAMA_BASE_URL", "http://127.0.0.1:11434"
+)
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3:latest")
 OLLAMA_TIMEOUT_SECONDS = int(
     os.getenv("OLLAMA_TIMEOUT_SECONDS", "120")
@@ -2966,14 +3134,107 @@ def ollama_chat_api():
             "success": False,
             "error": str(exc),
         }), 502
+<<<<<<< HEAD
 @app.route("/api/rag/sql-query", methods=["POST"], strict_slashes=False)
 @app.route("/api/rag/query", methods=["POST"], strict_slashes=False)
+=======
+from uuid import uuid4
+
+@app.route("/api/adf/explain-error", methods=["POST", "OPTIONS"])
+def explain_adf_error():
+    if request.method == "OPTIONS":
+        return "", 204
+
+    body = request.get_json(silent=True) or {}
+
+    activity = body.get("activity") or {}
+    if not isinstance(activity, dict):
+        activity = {}
+
+    error = activity.get("error") or {}
+    if isinstance(error, dict):
+        error_message = error.get("message", "")
+        error_code = error.get("errorCode", "")
+    else:
+        error_message = str(error)
+        error_code = ""
+
+    error_message = (
+        error_message
+        or body.get("pipeline_message")
+        or "No detailed error message was returned."
+    )
+
+    diagnostic_input = {
+        "pipeline_name": body.get("pipeline_name", "Unknown"),
+        "run_id": body.get("run_id", ""),
+        "pipeline_status": body.get("pipeline_status", "Failed"),
+        "activity_name": activity.get("activity_name", "Pipeline"),
+        "activity_type": activity.get("activity_type", ""),
+        "error_code": str(error_code),
+        "error_message": str(error_message),
+        "activity_output": activity.get("output", ""),
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an Azure Data Factory troubleshooting assistant. "
+                "Analyze the provided error without inventing facts. "
+                "Return only valid JSON containing these string fields: "
+                "error_code, error_message, likely_cause, "
+                "recommended_solution, next_action, confidence_note."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(diagnostic_input, default=str),
+        },
+    ]
+
+    try:
+        answer = ollama_chat(messages, json_mode=True)
+        diagnostic = json.loads(answer)
+
+        diagnostic.setdefault("error_code", str(error_code or "Not provided"))
+        diagnostic.setdefault("error_message", str(error_message))
+        diagnostic.setdefault("likely_cause", "Root cause requires verification.")
+        diagnostic.setdefault(
+            "recommended_solution",
+            "Inspect the failed activity output in ADF Monitor.",
+        )
+        diagnostic.setdefault(
+            "next_action",
+            "Verify the cause, apply the fix, and rerun the pipeline.",
+        )
+        diagnostic.setdefault(
+            "confidence_note",
+            "AI-generated suggestion; verify against Azure logs.",
+        )
+
+        diagnostic["pipeline_name"] = diagnostic_input["pipeline_name"]
+        diagnostic["activity_name"] = diagnostic_input["activity_name"]
+
+        return jsonify({"success": True, "diagnostic": diagnostic})
+
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        app.logger.exception("Ollama error diagnosis failed")
+        return jsonify({"success": False, "error": str(exc)}), 502
+# ==================== RAG API ====================
+
+@app.post("/api/rag/sql-query")
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 def rag_query():
     connection = None
 
     try:
         payload = request.get_json(silent=True) or {}
+<<<<<<< HEAD
         question = payload.get("question", payload.get("query", ""))
+=======
+        question = payload.get("question", "")
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 
         if not isinstance(question, str) or not question.strip():
             return jsonify({
@@ -3056,6 +3317,7 @@ Rules:
             timeout=180
         )
         response.raise_for_status()
+<<<<<<< HEAD
         
         sql = response.json()["message"]["content"].strip()
 
@@ -3068,13 +3330,24 @@ Rules:
         if sql.endswith(";"):
             sql = sql[:-1].rstrip()
 
+=======
+
+        sql = response.json()["message"]["content"].strip()
+        sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.I)
+        sql = re.sub(r"\s*```$", "", sql).strip()
+
+        # 3. Validate generated SQL
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
         if not re.match(r"^(SELECT|WITH)\b", sql, re.I):
             raise ValueError("Only SELECT queries are permitted.")
 
         if any(token in sql for token in (";", "--", "/*", "*/")):
             raise ValueError("Multiple statements or SQL comments rejected.")
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
         forbidden = re.compile(
             r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|"
             r"TRUNCATE|GRANT|REVOKE|CALL|EXECUTE|IMPORT|EXPORT)\b",
@@ -3115,6 +3388,7 @@ Rules:
         if not re.search(r"\bLIMIT\s+\d+\b", sql, re.I):
             sql += " LIMIT 100"
 
+<<<<<<< HEAD
         # 4. Execute query against Exasol.
         # If Ollama invents a column or produces invalid SQL, send the exact
         # Exasol error and the live schema back to Ollama for one correction.
@@ -3199,6 +3473,10 @@ EXASOL ERROR:
 
             # Execute the corrected query once. If it still fails, report it.
             rows = query_rows(connection, sql)
+=======
+        # 4. Execute query against Exasol
+        rows = query_rows(connection, sql)
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 
         connection.close()
         connection = None
@@ -3273,10 +3551,33 @@ Rules:
 # and BEFORE if __name__ == "__main__".
 # ============================================================
 
+<<<<<<< HEAD
+=======
+import json
+from uuid import uuid4
+
+import requests
+from flask import jsonify, request
+
+
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 # ------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------
 
+<<<<<<< HEAD
+=======
+# Reuse OLLAMA_URL and OLLAMA_MODEL from your existing app.py.
+# These defaults are used only if they have not been configured.
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL", "http://127.0.0.1:11434"
+).rstrip("/")
+
+OLLAMA_MODEL = os.getenv(
+    "OLLAMA_MODEL", "llama3:latest"
+)
+
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 REQUEST_TABLE = "HACKATHON.DATA_REQUESTS"
 
 VALID_PRIORITIES = {"Low", "Medium", "High", "Urgent"}
@@ -3314,8 +3615,12 @@ Rules:
 - Do not assume the user's permissions or data sensitivity.
 - Use UNDER REVIEW when information is insufficient.
 - Do not approve a request based on priority alone.
+<<<<<<< HEAD
 - Keep reasoning to exactly five words.
 - State whether the justification is clear or unclear.
+=======
+- Keep reasoning concise.
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 """
 
     response = requests.post(
@@ -3700,6 +4005,7 @@ def list_api_routes():
     }), 200
 
 
+<<<<<<< HEAD
 @app.route("/api/adf/explain-error", methods=["POST", "OPTIONS"])
 def explain_adf_error():
     if request.method == "OPTIONS":
@@ -4279,6 +4585,8 @@ def sync_all_azure_to_exasol():
             connection.close()
 
 
+=======
+>>>>>>> 9a46b28d456e682d96c69c0d73e0059de256b4da
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print("Starting OpsNexus Exasol DataOps Intelligence API")

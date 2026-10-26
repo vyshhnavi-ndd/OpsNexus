@@ -1,0 +1,20 @@
+[33m19ca35d[m[33m ([m[1;35mrefs/stash[m[33m)[m On feature/exasols-dashboard: Backup all my changes
+[33m36b1ac4[m index on feature/exasols-dashboard: d3eab9c exasol dashboard
+[33m64bc6d2[m untracked files on feature/exasols-dashboard: d3eab9c exasol dashboard
+[33m834494a[m[33m ([m[1;32mmain[m[33m)[m Exasol_updated
+[33me5f47c5[m[33m ([m[1;31morigin/main[m[33m)[m docs: add professional OpsNexus README
+[33m9a46b28[m[33m ([m[1;31morigin/feature/exasols-dashboard[m[33m)[m docs: add professional OpsNexus README
+[33ma290aaf[m Add project folders
+[33mc143da0[m Update Exasol dashboard and API
+[33m60e9d91[m Agent host session a39f7418-e9ae-47ad-b4f9-1a2967d06d4b - baseline checkpoint
+[33m3f2c38d[m Agent host session b194ed78-ef08-4854-ae32-2a485f6ce41b - baseline checkpoint
+[33mcd6b2a5[m Agent host session d9f5d9d7-fc42-4a6e-8f9e-393ffd94e2ce - turn 1
+[33m33d59b6[m Agent host session d9f5d9d7-fc42-4a6e-8f9e-393ffd94e2ce - turn 1 start
+[33m31c3ece[m Agent host session d9f5d9d7-fc42-4a6e-8f9e-393ffd94e2ce - baseline checkpoint
+[33mf58677e[m Merge pull request #1 from vyshhnavi-ndd/chore/exasol-adf-setup
+[33m1200863[m[33m ([m[1;31morigin/chore/exasol-adf-setup[m[33m)[m docs: clarify timestamp SQL status and document all test suites
+[33m8e92772[m chore: add backend/.env.example with required variable reference
+[33m68ef001[m fix: clean up backend/app.py - dedup imports, remove dead route
+[33m04eeb41[m feat: add dashboard API contract and UI integration
+[33m0942031[m feat: integrate dashboard with Exasol intelligence
+[33md81852a[m Update OpsNexus dashboard
