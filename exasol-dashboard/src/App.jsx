@@ -12,8 +12,6 @@ import {
   RefreshCw,
   Server,
   ShieldCheck,
-  Moon,
-  Sun,
   Wallet,
   X,
   XCircle,
@@ -189,7 +187,7 @@ export default function App() {
         getDeduplicated(`${API}/health`, { timeout: 6000 }),
         getDeduplicated(`${API}/metrics/overview`, { timeout: 8000 }),
         getDeduplicated(`${API}/trust/metrics`, { timeout: 8000 }),
-        getDeduplicated(`${API}/metrics/cost`, { timeout: 8000 }),
+        getDeduplicated(`${API}/metrics/cost`, { timeout: 65000 }),
         getDeduplicated(`${API}/tables`, { timeout: 8000 }),
       ]);
 

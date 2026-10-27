@@ -26,7 +26,7 @@ from azure.identity import ClientSecretCredential
 
 # Azure Cost Management is heavily throttled. Cache successful cost queries and
 # avoid repeatedly hitting Azure when it has returned HTTP 429.
-COST_CACHE_TTL = 6 * 60 * 60
+COST_CACHE_TTL = 4 * 60 * 60
 COST_RATE_LIMIT_WAIT = 15 * 60
 USAGE_BILLING_CACHE_TTL = 60
 
@@ -41,6 +41,7 @@ _cost_lock = threading.Lock()
 # Keep stale successful data available as a fallback during Azure throttling.
 _daily_cost_cache = {}
 _daily_cost_lock = threading.Lock()
+_daily_cost_inflight = {}
 _usage_billing_cache = {}
 _usage_billing_lock = threading.Lock()
 
@@ -149,137 +150,193 @@ CORS(app, resources={
 # ============================================================
 
 def fetch_daily_cost(access_token, start_date, end_date):
-    """Fetch daily Azure costs, caching successful results and respecting 429s.
+    """Return daily Azure costs using one shared cache for all billing routes.
 
-    A successful result is cached for COST_CACHE_TTL. If Azure throttles a
-    refresh, previously fetched values for the same date range are returned
-    when available; otherwise the HTTP error is raised to the route handler.
+    Successful queries are cached for four hours. Concurrent requests for the
+    same date range share one Azure request. During a 429 cooldown, previously
+    successful data is returned stale rather than issuing more Azure requests.
     """
     cache_key = (start_date.isoformat(), end_date.isoformat())
     now = time.time()
 
     with _daily_cost_lock:
         cached = _daily_cost_cache.get(cache_key)
-        if cached and now < cached["expires_at"]:
-            app.logger.info("Using cached Azure daily cost data for %s to %s", *cache_key)
+
+        if cached and now < cached.get("expires_at", 0):
+            app.logger.info(
+                "Using cached Azure daily costs for %s to %s", *cache_key
+            )
             return dict(cached["data"])
+
         if cached and now < cached.get("blocked_until", 0):
             if cached.get("data") is not None:
+                app.logger.warning(
+                    "Serving stale Azure costs during rate-limit cooldown"
+                )
                 return dict(cached["data"])
             wait_left = max(1, int(cached["blocked_until"] - now))
             raise requests.HTTPError(
                 f"Azure Cost Management is rate-limited; retry in about {wait_left} seconds."
             )
 
-    url = (
-        f"{ARM}/subscriptions/{SUBSCRIPTION_ID}"
-        "/providers/Microsoft.CostManagement/query"
-    )
-    payload = {
-        "type": "ActualCost",
-        "timeframe": "Custom",
-        "timePeriod": {
-            "from": f"{start_date.isoformat()}T00:00:00Z",
-            "to": f"{end_date.isoformat()}T23:59:59Z",
-        },
-        "dataset": {
-            "granularity": "Daily",
-            "aggregation": {
-                "totalCost": {"name": "PreTaxCost", "function": "Sum"}
-            },
-        },
-    }
+        event = _daily_cost_inflight.get(cache_key)
+        if event is None:
+            event = threading.Event()
+            _daily_cost_inflight[cache_key] = event
+            is_fetcher = True
+        else:
+            is_fetcher = False
 
-    response = requests.post(
-        url,
-        params={"api-version": "2023-11-01"},
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=60,
-    )
-
-    if response.status_code == 429:
-        retry_after = (
-            response.headers.get("Retry-After")
-            or response.headers.get("x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after")
-            or response.headers.get("x-ms-ratelimit-microsoft.consumption-retry-after")
-        )
-        try:
-            wait_seconds = max(60, int(float(retry_after)))
-        except (TypeError, ValueError):
-            wait_seconds = COST_RATE_LIMIT_WAIT
-
-        app.logger.warning(
-            "Azure Cost Management throttled this request (429); next attempt should wait %s seconds",
-            wait_seconds,
-        )
+    if not is_fetcher:
+        event.wait(timeout=65)
         with _daily_cost_lock:
             cached = _daily_cost_cache.get(cache_key)
-            if cached:
-                cached["blocked_until"] = time.time() + wait_seconds
-                app.logger.warning("Serving stale cached daily cost data after Azure 429")
+            now = time.time()
+            if cached and cached.get("data") is not None:
+                # A waiting request can reuse the just-fetched data, even if
+                # another caller marked it stale during a 429 response.
                 return dict(cached["data"])
-            _daily_cost_cache[cache_key] = {
-                "data": None,
-                "expires_at": 0,
-                "blocked_until": time.time() + wait_seconds,
-            }
-        response.raise_for_status()
-
-    if not response.ok:
-        app.logger.error(
-            "Azure billing API returned HTTP %s: %s",
-            response.status_code,
-            response.text[:2000],
-        )
-        response.raise_for_status()
-
-    result = response.json()
-    properties = result.get("properties", {})
-    columns = properties.get("columns", [])
-    rows = properties.get("rows", [])
-    column_names = [column.get("name", "") for column in columns]
-
-    date_column = next(
-        (name for name in column_names if name.lower() in ("usagedate", "date")),
-        None,
-    )
-    cost_column = next(
-        (name for name in column_names if name.lower() in ("pretaxcost", "cost", "totalcost")),
-        None,
-    )
-    if date_column is None or cost_column is None:
-        raise ValueError(
-            "Unexpected Azure Cost Management response columns: "
-            f"{column_names}. Check the Azure response and aggregation."
+            if cached and now < cached.get("blocked_until", 0):
+                wait_left = max(1, int(cached["blocked_until"] - now))
+                raise requests.HTTPError(
+                    f"Azure Cost Management is rate-limited; retry in about {wait_left} seconds."
+                )
+        raise requests.Timeout(
+            "Timed out waiting for the active Azure Cost Management request."
         )
 
-    date_index = column_names.index(date_column)
-    cost_index = column_names.index(cost_column)
-    daily_costs = {}
-    for row in rows:
-        if len(row) <= max(date_index, cost_index):
-            continue
-        raw_date, raw_cost = row[date_index], row[cost_index]
-        if raw_date is None or raw_cost is None:
-            continue
-        date_text = str(raw_date)
-        if len(date_text) == 8 and date_text.isdigit():
-            day = f"{date_text[:4]}-{date_text[4:6]}-{date_text[6:8]}"
-        else:
-            day = date.fromisoformat(date_text[:10]).isoformat()
-        daily_costs[day] = daily_costs.get(day, 0.0) + float(raw_cost)
-
-    with _daily_cost_lock:
-        _daily_cost_cache[cache_key] = {
-            "data": dict(daily_costs),
-            "expires_at": time.time() + COST_CACHE_TTL,
-            "blocked_until": 0,
+    try:
+        url = (
+            f"{ARM}/subscriptions/{SUBSCRIPTION_ID}"
+            "/providers/Microsoft.CostManagement/query"
+        )
+        payload = {
+            "type": "ActualCost",
+            "timeframe": "Custom",
+            "timePeriod": {
+                "from": f"{start_date.isoformat()}T00:00:00Z",
+                "to": f"{end_date.isoformat()}T23:59:59Z",
+            },
+            "dataset": {
+                "granularity": "Daily",
+                "aggregation": {
+                    "totalCost": {"name": "PreTaxCost", "function": "Sum"}
+                },
+            },
         }
-    return daily_costs
+
+        response = requests.post(
+            url,
+            params={"api-version": "2023-11-01"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+        )
+
+        if response.status_code == 429:
+            retry_headers = (
+                "Retry-After",
+                "x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after",
+                "x-ms-ratelimit-microsoft.costmanagement-entity-retry-after",
+                "x-ms-ratelimit-microsoft.costmanagement-tenant-retry-after",
+                "x-ms-ratelimit-microsoft.consumption-retry-after",
+            )
+            delays = []
+            for header in retry_headers:
+                value = response.headers.get(header)
+                if value:
+                    try:
+                        delays.append(float(value))
+                    except (TypeError, ValueError):
+                        pass
+            wait_seconds = max([COST_RATE_LIMIT_WAIT] + delays)
+
+            app.logger.warning(
+                "Azure Cost Management returned HTTP 429. Cooldown=%s seconds; retry headers=%s",
+                int(wait_seconds),
+                {h: response.headers[h] for h in retry_headers if h in response.headers},
+            )
+
+            with _daily_cost_lock:
+                cached = _daily_cost_cache.get(cache_key)
+                if cached and cached.get("data") is not None:
+                    cached["blocked_until"] = time.time() + wait_seconds
+                    return dict(cached["data"])
+                _daily_cost_cache[cache_key] = {
+                    "data": None,
+                    "expires_at": 0,
+                    "blocked_until": time.time() + wait_seconds,
+                }
+
+            try:
+                details = response.json()
+            except ValueError:
+                details = response.text[:2000]
+            raise requests.HTTPError(
+                f"Azure Cost Management returned HTTP 429: {details}",
+                response=response,
+            )
+
+        if not response.ok:
+            app.logger.error(
+                "Azure billing API returned HTTP %s: %s",
+                response.status_code,
+                response.text[:2000],
+            )
+            response.raise_for_status()
+
+        result = response.json()
+        properties = result.get("properties", {})
+        columns = properties.get("columns", [])
+        rows = properties.get("rows", [])
+        column_names = [column.get("name", "") for column in columns]
+
+        date_column = next(
+            (name for name in column_names if name.lower() in ("usagedate", "date")),
+            None,
+        )
+        cost_column = next(
+            (name for name in column_names if name.lower() in ("pretaxcost", "cost", "totalcost")),
+            None,
+        )
+        if date_column is None or cost_column is None:
+            raise ValueError(
+                "Unexpected Azure Cost Management response columns: "
+                f"{column_names}. Check the Azure response and aggregation."
+            )
+
+        date_index = column_names.index(date_column)
+        cost_index = column_names.index(cost_column)
+        daily_costs = {}
+        for row in rows:
+            if len(row) <= max(date_index, cost_index):
+                continue
+            raw_date, raw_cost = row[date_index], row[cost_index]
+            if raw_date is None or raw_cost is None:
+                continue
+            date_text = str(raw_date)
+            if len(date_text) == 8 and date_text.isdigit():
+                day = f"{date_text[:4]}-{date_text[4:6]}-{date_text[6:8]}"
+            else:
+                day = date.fromisoformat(date_text[:10]).isoformat()
+            daily_costs[day] = daily_costs.get(day, 0.0) + float(raw_cost)
+
+        with _daily_cost_lock:
+            _daily_cost_cache[cache_key] = {
+                "data": dict(daily_costs),
+                "expires_at": time.time() + COST_CACHE_TTL,
+                "blocked_until": 0,
+            }
+        return daily_costs
+
+    finally:
+        with _daily_cost_lock:
+            finished = _daily_cost_inflight.pop(cache_key, None)
+            if finished:
+                finished.set()
 
 
 # ============================================================
@@ -292,10 +349,12 @@ def get_azure_token():
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
     )
-
-    return credential.get_token(
-        "https://management.azure.com/.default"
-    ).token
+    try:
+        return credential.get_token(
+            "https://management.azure.com/.default"
+        ).token
+    finally:
+        credential.close()
 
 
 # ============================================================
@@ -1678,196 +1737,60 @@ def debug_adf():
 
 @app.route("/api/metrics/cost", methods=["GET"])
 def get_azure_cost():
-    # Use the cache first, without contacting Azure.
-    now = time.time()
-
-    with _cost_lock:
-        if (
-            _cost_cache["data"] is not None
-            and now < _cost_cache["expires_at"]
-        ):
-            cached = dict(_cost_cache["data"])
-            cached["cached"] = True
-            return jsonify(cached), 200
-
-        if now < _cost_cache["blocked_until"]:
-            return jsonify({
-                "success": False,
-                "error": "Azure cost API temporarily rate-limited",
-                "retry_after_seconds": int(
-                    _cost_cache["blocked_until"] - now
-                )
-            }), 429
-
-    try:
-        subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
-        tenant_id = os.getenv("AZURE_TENANT_ID")
-        client_id = os.getenv("AZURE_CLIENT_ID")
-        client_secret = os.getenv("AZURE_CLIENT_SECRET")
-
-        if not all([
-            subscription_id,
-            tenant_id,
-            client_id,
-            client_secret
-        ]):
-            return jsonify({
-                "success": False,
-                "error": "Azure credentials are missing"
-            }), 500
-
-        days = request.args.get("days", default=30, type=int)
-
-        if days is None or not 1 <= days <= 90:
-            return jsonify({
-                "success": False,
-                "error": "days must be between 1 and 90"
-            }), 400
-
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days - 1)
-
-        credential = ClientSecretCredential(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_secret=client_secret
-        )
-
-        try:
-            token = credential.get_token(
-                "https://management.azure.com/.default"
-            ).token
-
-            url = (
-                f"https://management.azure.com/subscriptions/"
-                f"{subscription_id}/providers/Microsoft.CostManagement/"
-                f"query?api-version=2026-06-01"
-            )
-
-            payload = {
-                "type": "ActualCost",
-                "timeframe": "Custom",
-                "timePeriod": {
-                    "from": start_date.isoformat(),
-                    "to": end_date.isoformat()
-                },
-                "dataset": {
-                    "granularity": "Daily",
-                    "aggregation": {
-                        "totalCost": {
-                            "name": "PreTaxCost",
-                            "function": "Sum"
-                        }
-                    },
-                    "grouping": [{
-                        "type": "Dimension",
-                        "name": "ResourceGroup"
-                    }]
-                }
-            }
-
-            response = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                },
-                json=payload,
-                timeout=60
-            )
-
-        finally:
-            credential.close()
-
-        if not response.ok:
-            try:
-                details = response.json()
-            except ValueError:
-                details = response.text[:2000]
-
-            app.logger.error(
-                "Azure cost API failed: status=%s details=%s",
-                response.status_code,
-                str(details)[:2000]
-            )
-
-            if response.status_code == 429:
-                retry_after = (
-                    response.headers.get("Retry-After")
-                    or response.headers.get(
-                        "x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after"
-                    )
-                    or response.headers.get(
-                        "x-ms-ratelimit-microsoft.consumption-retry-after"
-                    )
-                )
-
-                try:
-                    wait_seconds = max(60, int(float(retry_after)))
-                except (TypeError, ValueError):
-                    wait_seconds = COST_RATE_LIMIT_WAIT
-
-                with _cost_lock:
-                    _cost_cache["blocked_until"] = (
-                        time.time() + wait_seconds
-                    )
-
-                return jsonify({
-                    "success": False,
-                    "error": "Azure cost API rate limit exceeded",
-                    "azure_status": 429,
-                    "retry_after_seconds": wait_seconds,
-                    "details": details
-                }), 429
-
-            return jsonify({
-                "success": False,
-                "error": "Azure Cost Management API failed",
-                "azure_status": response.status_code,
-                "details": details
-            }), response.status_code
-
-        result = response.json()
-        properties = result.get("properties", {})
-
-        columns = [
-            column.get("name")
-            for column in properties.get("columns", [])
-        ]
-
-        rows = [
-            dict(zip(columns, row))
-            for row in properties.get("rows", [])
-        ]
-
-        output = {
-            "success": True,
-            "scope": f"subscription/{subscription_id}",
-            "period": {
-                "from": start_date.isoformat(),
-                "to": end_date.isoformat()
-            },
-            "columns": columns,
-            "total_rows": len(rows),
-            "cost_data": rows,
-            "cached": False
-        }
-
-        with _cost_lock:
-            _cost_cache["data"] = output
-            _cost_cache["expires_at"] = (
-                time.time() + COST_CACHE_TTL
-            )
-            _cost_cache["blocked_until"] = 0
-
-        return jsonify(output), 200
-
-    except Exception:
-        app.logger.exception("Azure cost retrieval failed")
-
+    """Return cost rows from the shared cached daily-cost query."""
+    days = request.args.get("days", default=30, type=int)
+    if days is None or not 1 <= days <= 90:
         return jsonify({
             "success": False,
-            "error": "Failed to retrieve Azure costs"
+            "error": "days must be between 1 and 90",
+        }), 400
+
+    try:
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=days - 1)
+        cache_key = (start_date.isoformat(), end_date.isoformat())
+
+        with _daily_cost_lock:
+            existing = _daily_cost_cache.get(cache_key)
+            was_cached = bool(existing and existing.get("data") is not None)
+
+        token = get_azure_token()
+        daily_costs = fetch_daily_cost(token, start_date, end_date)
+
+        rows = [
+            {
+                "UsageDate": day.replace("-", ""),
+                "PreTaxCost": amount,
+            }
+            for day, amount in sorted(daily_costs.items())
+        ]
+        output = {
+            "success": True,
+            "scope": f"subscription/{SUBSCRIPTION_ID}",
+            "period": {
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "days_requested": days,
+            },
+            "columns": ["UsageDate", "PreTaxCost"],
+            "total_rows": len(rows),
+            "cost_data": rows,
+            "cached": was_cached,
+        }
+        return jsonify(output), 200
+
+    except requests.RequestException as exc:
+        app.logger.warning("Azure cost retrieval unavailable: %s", exc)
+        return jsonify({
+            "success": False,
+            "error": "Azure Cost Management is temporarily unavailable or rate-limited.",
+            "details": str(exc),
+        }), 429 if "429" in str(exc) or "rate-limit" in str(exc).lower() else 502
+    except Exception:
+        app.logger.exception("Azure cost retrieval failed")
+        return jsonify({
+            "success": False,
+            "error": "Failed to retrieve Azure costs",
         }), 500
 
 @app.route("/api/debug/azure-config")
