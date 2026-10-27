@@ -8,6 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import math
 import pyexasol
 from pyexasol.exceptions import ExaAuthError
 from flask import Flask, jsonify, request
@@ -23,19 +24,25 @@ from datetime import date, timedelta
 from flask import jsonify, request
 from azure.identity import ClientSecretCredential
 
-# Cost data is cached for 6 hours.
+# Azure Cost Management is heavily throttled. Cache successful cost queries and
+# avoid repeatedly hitting Azure when it has returned HTTP 429.
 COST_CACHE_TTL = 6 * 60 * 60
-
-# Fallback wait if Azure does not provide a retry interval.
 COST_RATE_LIMIT_WAIT = 15 * 60
+USAGE_BILLING_CACHE_TTL = 60
 
 _cost_cache = {
     "data": None,
     "expires_at": 0,
-    "blocked_until": 0
+    "blocked_until": 0,
 }
-
 _cost_lock = threading.Lock()
+
+# Separate cache for daily cost data used by /api/metrics/usage-billing.
+# Keep stale successful data available as a fallback during Azure throttling.
+_daily_cost_cache = {}
+_daily_cost_lock = threading.Lock()
+_usage_billing_cache = {}
+_usage_billing_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -52,7 +59,21 @@ frontend_origins = [
     for origin in os.getenv("FRONTEND_URL", "http://localhost:5173").split(",")
     if origin.strip()
 ]
-CORS(app, resources={r"/api/*": {"origins": frontend_origins}})
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": [
+                "http://localhost:3000",
+                "http://localhost:5173",
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:5173",
+            ]
+        }
+    },
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 EXASOL_HOST = os.getenv("EXASOL_HOST", "127.0.0.1").strip()
 EXASOL_PORT = int(os.getenv("EXASOL_PORT", "8563"))
@@ -128,11 +149,32 @@ CORS(app, resources={
 # ============================================================
 
 def fetch_daily_cost(access_token, start_date, end_date):
+    """Fetch daily Azure costs, caching successful results and respecting 429s.
+
+    A successful result is cached for COST_CACHE_TTL. If Azure throttles a
+    refresh, previously fetched values for the same date range are returned
+    when available; otherwise the HTTP error is raised to the route handler.
+    """
+    cache_key = (start_date.isoformat(), end_date.isoformat())
+    now = time.time()
+
+    with _daily_cost_lock:
+        cached = _daily_cost_cache.get(cache_key)
+        if cached and now < cached["expires_at"]:
+            app.logger.info("Using cached Azure daily cost data for %s to %s", *cache_key)
+            return dict(cached["data"])
+        if cached and now < cached.get("blocked_until", 0):
+            if cached.get("data") is not None:
+                return dict(cached["data"])
+            wait_left = max(1, int(cached["blocked_until"] - now))
+            raise requests.HTTPError(
+                f"Azure Cost Management is rate-limited; retry in about {wait_left} seconds."
+            )
+
     url = (
         f"{ARM}/subscriptions/{SUBSCRIPTION_ID}"
         "/providers/Microsoft.CostManagement/query"
     )
-
     payload = {
         "type": "ActualCost",
         "timeframe": "Custom",
@@ -143,10 +185,7 @@ def fetch_daily_cost(access_token, start_date, end_date):
         "dataset": {
             "granularity": "Daily",
             "aggregation": {
-                "totalCost": {
-                    "name": "PreTaxCost",
-                    "function": "Sum",
-                }
+                "totalCost": {"name": "PreTaxCost", "function": "Sum"}
             },
         },
     }
@@ -162,11 +201,39 @@ def fetch_daily_cost(access_token, start_date, end_date):
         timeout=60,
     )
 
+    if response.status_code == 429:
+        retry_after = (
+            response.headers.get("Retry-After")
+            or response.headers.get("x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after")
+            or response.headers.get("x-ms-ratelimit-microsoft.consumption-retry-after")
+        )
+        try:
+            wait_seconds = max(60, int(float(retry_after)))
+        except (TypeError, ValueError):
+            wait_seconds = COST_RATE_LIMIT_WAIT
+
+        app.logger.warning(
+            "Azure Cost Management throttled this request (429); next attempt should wait %s seconds",
+            wait_seconds,
+        )
+        with _daily_cost_lock:
+            cached = _daily_cost_cache.get(cache_key)
+            if cached:
+                cached["blocked_until"] = time.time() + wait_seconds
+                app.logger.warning("Serving stale cached daily cost data after Azure 429")
+                return dict(cached["data"])
+            _daily_cost_cache[cache_key] = {
+                "data": None,
+                "expires_at": 0,
+                "blocked_until": time.time() + wait_seconds,
+            }
+        response.raise_for_status()
+
     if not response.ok:
         app.logger.error(
             "Azure billing API returned HTTP %s: %s",
             response.status_code,
-            response.text,
+            response.text[:2000],
         )
         response.raise_for_status()
 
@@ -174,28 +241,16 @@ def fetch_daily_cost(access_token, start_date, end_date):
     properties = result.get("properties", {})
     columns = properties.get("columns", [])
     rows = properties.get("rows", [])
-
-    column_names = [
-        column.get("name", "")
-        for column in columns
-    ]
+    column_names = [column.get("name", "") for column in columns]
 
     date_column = next(
-        (
-            name for name in column_names
-            if name.lower() in ("usagedate", "date")
-        ),
+        (name for name in column_names if name.lower() in ("usagedate", "date")),
         None,
     )
-
     cost_column = next(
-        (
-            name for name in column_names
-            if name.lower() in ("pretaxcost", "cost", "totalcost")
-        ),
+        (name for name in column_names if name.lower() in ("pretaxcost", "cost", "totalcost")),
         None,
     )
-
     if date_column is None or cost_column is None:
         raise ValueError(
             "Unexpected Azure Cost Management response columns: "
@@ -204,31 +259,26 @@ def fetch_daily_cost(access_token, start_date, end_date):
 
     date_index = column_names.index(date_column)
     cost_index = column_names.index(cost_column)
-
     daily_costs = {}
-
     for row in rows:
         if len(row) <= max(date_index, cost_index):
             continue
-
-        raw_date = row[date_index]
-        raw_cost = row[cost_index]
-
+        raw_date, raw_cost = row[date_index], row[cost_index]
         if raw_date is None or raw_cost is None:
             continue
-
         date_text = str(raw_date)
-
         if len(date_text) == 8 and date_text.isdigit():
-            day = (
-                f"{date_text[:4]}-{date_text[4:6]}-"
-                f"{date_text[6:8]}"
-            )
+            day = f"{date_text[:4]}-{date_text[4:6]}-{date_text[6:8]}"
         else:
             day = date.fromisoformat(date_text[:10]).isoformat()
-
         daily_costs[day] = daily_costs.get(day, 0.0) + float(raw_cost)
 
+    with _daily_cost_lock:
+        _daily_cost_cache[cache_key] = {
+            "data": dict(daily_costs),
+            "expires_at": time.time() + COST_CACHE_TTL,
+            "blocked_until": 0,
+        }
     return daily_costs
 
 
@@ -399,7 +449,571 @@ def fetch_pipeline_runs(token, start_date, end_date):
     return runs
 
 
+def load_adf_pipeline_id_map():
+    """Load optional ADF-name -> EXISTING pipeline ID mappings from .env.
+
+    Example .env value (only use a mapping that is correct for your data):
+      ADF_PIPELINE_ID_MAP={"pipeline1":"PL001","sales_load":"PL002"}
+
+    Unmapped ADF pipelines are skipped instead of being assigned invented IDs.
+    """
+    raw = os.getenv("ADF_PIPELINE_ID_MAP", "{}").strip() or "{}"
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "ADF_PIPELINE_ID_MAP must be valid JSON mapping ADF pipeline names "
+            "to existing PIPELINE_ID values."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("ADF_PIPELINE_ID_MAP must be a JSON object.")
+    return {
+        str(name).strip().casefold(): str(pipeline_id).strip()
+        for name, pipeline_id in parsed.items()
+        if str(name).strip() and str(pipeline_id).strip()
+    }
+
+
 # ============================================================
+# SYNCHRONIZE ADF PIPELINES, RUNS AND INCIDENTS INTO EXASOL
+# POST /api/adf/sync-pipelines-to-exasol?days=30
+# ============================================================
+@app.post("/api/adf/sync-pipelines-to-exasol")
+def sync_adf_pipelines_to_exasol():
+    connection = None
+
+    try:
+        days = request.args.get("days", default=30, type=int)
+
+        if days is None or not 1 <= days <= 90:
+            return jsonify({
+                "success": False,
+                "error": "days must be between 1 and 90",
+            }), 400
+
+        # --------------------------------------------------
+        # 1. Fetch actual Azure Data Factory data
+        # --------------------------------------------------
+
+        token = get_azure_token()
+
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=days - 1)
+
+        runs = fetch_pipeline_runs(
+            token,
+            start_date,
+            end_date,
+        )
+
+        factory_url = (
+            f"{ARM}/subscriptions/{SUBSCRIPTION_ID}"
+            f"/resourceGroups/{RESOURCE_GROUP}"
+            f"/providers/Microsoft.DataFactory/factories/"
+            f"{DATA_FACTORY}/pipelines"
+        )
+
+        response = requests.get(
+            factory_url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"api-version": API_VERSION},
+            timeout=45,
+        )
+        response.raise_for_status()
+
+        pipeline_definitions = response.json().get("value", [])
+
+        # --------------------------------------------------
+        # 2. Connect and verify Exasol tables
+        # --------------------------------------------------
+
+        connection = get_connection()
+        schema_name = "HACKATHON"
+        quoted_schema = quote_identifier(schema_name)
+
+        existing_tables = {
+            row["table_name"].upper()
+            for row in metadata_tables(connection, schema_name)
+        }
+
+        required_tables = {
+            "STG_PIPELINE_DEFINITIONS",
+            "STG_PIPELINE_RUNS",
+            "STG_INCIDENT_HISTORY",
+            "STG_SCENARIO_METADATA",
+        }
+
+        missing_tables = required_tables - existing_tables
+
+        if missing_tables:
+            return jsonify({
+                "success": False,
+                "error": "Required Exasol tables are missing",
+                "missing_tables": sorted(missing_tables),
+            }), 400
+
+        # SCENARIO_INSTANCE_ID is a foreign key, not just a required text
+        # column. Resolve IDs against the parent scenario metadata table before
+        # inserting any ADF run/incident rows.
+        scenario_metadata_table = f"{quoted_schema}.{quote_identifier('STG_SCENARIO_METADATA')}"
+        scenario_rows = query_rows(
+            connection,
+            f"SELECT SCENARIO_INSTANCE_ID FROM {scenario_metadata_table}"
+        )
+        valid_scenario_ids = {
+            str(row.get("scenario_instance_id")).strip()
+            for row in scenario_rows
+            if row.get("scenario_instance_id") is not None
+            and str(row.get("scenario_instance_id")).strip()
+        }
+        if not valid_scenario_ids:
+            raise ValueError(
+                "STG_SCENARIO_METADATA has no SCENARIO_INSTANCE_ID values. "
+                "Insert at least one valid scenario metadata row before syncing ADF runs."
+            )
+        default_scenario_id = sorted(valid_scenario_ids)[0]
+
+        table_columns_cache = {}
+
+        def get_table_columns(table_name):
+            if table_name not in table_columns_cache:
+                table_columns_cache[table_name] = {
+                    row["column_name"].upper()
+                    for row in metadata_columns(
+                        connection,
+                        schema_name,
+                        table_name,
+                    )
+                }
+
+            return table_columns_cache[table_name]
+
+        # --------------------------------------------------
+        # 3. Build safe SQL literals.
+        # No query_params are passed to connection.execute().
+        # --------------------------------------------------
+
+        def sql_literal(value):
+            if value is None:
+                return "NULL"
+
+            if isinstance(value, bool):
+                return "TRUE" if value else "FALSE"
+
+            if isinstance(value, datetime):
+                if value.tzinfo is not None:
+                    value = value.astimezone(
+                        timezone.utc
+                    ).replace(tzinfo=None)
+
+                timestamp = value.strftime(
+                    "%Y-%m-%d %H:%M:%S.%f"
+                )
+
+                return f"CAST('{timestamp}' AS TIMESTAMP)"
+
+            if isinstance(value, date):
+                return f"DATE '{value.isoformat()}'"
+
+            if isinstance(value, Decimal):
+                if not value.is_finite():
+                    return "NULL"
+                return str(value)
+
+            if isinstance(value, int):
+                return str(value)
+
+            if isinstance(value, float):
+                if not math.isfinite(value):
+                    return "NULL"
+                return repr(value)
+
+            escaped = str(value).replace("'", "''")
+            return f"'{escaped}'"
+
+        # --------------------------------------------------
+        # 4. Insert only when the primary key does not exist
+        # --------------------------------------------------
+
+        def insert_if_new(
+            table_name,
+            key_column,
+            record,
+            required_columns,
+        ):
+            if record.get(key_column) in (None, ""):
+                return False
+
+            table_columns = get_table_columns(table_name)
+
+            missing_columns = (
+                set(required_columns) - table_columns
+            )
+
+            if missing_columns:
+                raise ValueError(
+                    f"{table_name} is missing columns: "
+                    f"{', '.join(sorted(missing_columns))}"
+                )
+
+            columns = [
+                column
+                for column in record
+                if column.upper() in table_columns
+            ]
+
+            if key_column.upper() not in {
+                column.upper() for column in columns
+            }:
+                raise ValueError(
+                    f"{table_name} does not contain "
+                    f"key column {key_column}"
+                )
+
+            quoted_table = (
+                f"{quoted_schema}."
+                f"{quote_identifier(table_name)}"
+            )
+
+            key_sql = sql_literal(record[key_column])
+
+            check_sql = (
+                f"SELECT 1 FROM {quoted_table} "
+                f"WHERE {quote_identifier(key_column)} "
+                f"= {key_sql} LIMIT 1"
+            )
+
+            check_statement = connection.execute(check_sql)
+
+            try:
+                exists = check_statement.fetchone() is not None
+            finally:
+                check_statement.close()
+
+            if exists:
+                return False
+
+            quoted_columns = ", ".join(
+                quote_identifier(column)
+                for column in columns
+            )
+
+            values_sql = ", ".join(
+                sql_literal(record[column])
+                for column in columns
+            )
+
+            insert_sql = (
+                f"INSERT INTO {quoted_table} "
+                f"({quoted_columns}) "
+                f"VALUES ({values_sql})"
+            )
+
+            statement = connection.execute(insert_sql)
+            statement.close()
+
+            return True
+
+        # --------------------------------------------------
+        # 5. Load existing pipeline and source mappings
+        # --------------------------------------------------
+
+        definitions_table = (
+            f"{quoted_schema}."
+            f"{quote_identifier('STG_PIPELINE_DEFINITIONS')}"
+        )
+
+        existing_definitions = query_rows(
+            connection,
+            f"""
+                SELECT PIPELINE_ID, PIPELINE_NAME, SOURCE_ID
+                FROM {definitions_table}
+            """,
+        )
+
+        pipeline_id_by_name = {}
+        source_id_by_name = {}
+        existing_source_ids = []
+
+        for row in existing_definitions:
+            name = row.get("pipeline_name")
+            pipeline_id = row.get("pipeline_id")
+            source_id = row.get("source_id")
+
+            if name and pipeline_id:
+                pipeline_id_by_name[name] = pipeline_id
+
+            if name and source_id:
+                source_id_by_name[name] = source_id
+
+            if source_id and source_id not in existing_source_ids:
+                existing_source_ids.append(source_id)
+
+        # Fallback prevents NULL SOURCE_ID. This is only a
+        # technical fallback, not proof of correct data lineage.
+        fallback_source_id = (
+            existing_source_ids[0]
+            if existing_source_ids
+            else None
+        )
+
+        definitions_inserted = 0
+        runs_inserted = 0
+        incidents_inserted = 0
+        source_fallbacks_used = []
+
+        # --------------------------------------------------
+        # --------------------------------------------------
+        # 6. Resolve ADF pipeline names to EXISTING parent IDs.
+        # Never manufacture a PIPELINE_ID from an Azure name such as pipeline1.
+        # Use ADF_PIPELINE_ID_MAP only for intentional business mappings.
+        # --------------------------------------------------
+        valid_pipeline_ids = {
+            str(row.get("pipeline_id")).strip()
+            for row in existing_definitions
+            if row.get("pipeline_id") is not None
+            and str(row.get("pipeline_id")).strip()
+        }
+        pipeline_id_by_normalized_name = {
+            str(row.get("pipeline_name")).strip().casefold():
+                str(row.get("pipeline_id")).strip()
+            for row in existing_definitions
+            if row.get("pipeline_name") and row.get("pipeline_id")
+        }
+        explicit_pipeline_map = load_adf_pipeline_id_map()
+        unmapped_pipeline_definitions = []
+        definitions_inserted = 0
+        runs_inserted = 0
+        incidents_inserted = 0
+        source_fallbacks_used = []
+
+        for definition in pipeline_definitions:
+            pipeline_name = definition.get("name")
+            if not pipeline_name:
+                continue
+            normalized_name = str(pipeline_name).strip().casefold()
+            pipeline_id = (
+                explicit_pipeline_map.get(normalized_name)
+                or pipeline_id_by_normalized_name.get(normalized_name)
+            )
+            if pipeline_id is None and str(pipeline_name).strip() in valid_pipeline_ids:
+                pipeline_id = str(pipeline_name).strip()
+            if pipeline_id not in valid_pipeline_ids:
+                unmapped_pipeline_definitions.append({
+                    "pipeline_name": pipeline_name,
+                    "reason": (
+                        "No matching existing PIPELINE_ID. Add the correct mapping "
+                        "to ADF_PIPELINE_ID_MAP or register the pipeline in "
+                        "STG_PIPELINE_DEFINITIONS first."
+                    ),
+                })
+                continue
+            pipeline_id_by_name[pipeline_name] = pipeline_id
+
+        # --------------------------------------------------
+
+        skipped_pipeline_runs = []
+
+        # 7. Parse timestamps returned by Azure
+        # --------------------------------------------------
+
+        def parse_timestamp(value):
+            if not value:
+                return None
+
+            parsed = datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            )
+
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(
+                    timezone.utc
+                ).replace(tzinfo=None)
+
+            return parsed
+
+        # --------------------------------------------------
+        # 8. Sync actual ADF runs and failure incidents
+        # --------------------------------------------------
+
+        for run in runs:
+            run_id = run.get("runId")
+            pipeline_name = run.get("pipelineName")
+
+            if not run_id or not pipeline_name:
+                continue
+
+            pipeline_id = (
+                pipeline_id_by_name.get(pipeline_name)
+                or explicit_pipeline_map.get(str(pipeline_name).strip().casefold())
+                or pipeline_id_by_normalized_name.get(str(pipeline_name).strip().casefold())
+            )
+            if pipeline_id is None or str(pipeline_id).strip() not in valid_pipeline_ids:
+                skipped_pipeline_runs.append({
+                    "run_id": run_id,
+                    "pipeline_name": pipeline_name,
+                    "reason": "No matching PIPELINE_ID exists in STG_PIPELINE_DEFINITIONS",
+                })
+                app.logger.warning(
+                    "Skipping ADF run %s: pipeline '%s' has no valid parent definition",
+                    run_id, pipeline_name,
+                )
+                continue
+
+            status = str(
+                run.get("status") or "UNKNOWN"
+            ).upper()
+
+            started_at = parse_timestamp(run.get("runStart"))
+            ended_at = parse_timestamp(run.get("runEnd"))
+            if started_at is None:
+                skipped_pipeline_runs.append({
+                    "run_id": run_id,
+                    "pipeline_name": pipeline_name,
+                    "reason": "ADF run has no runStart; STARTED_AT is required by Exasol.",
+                })
+                continue
+
+            duration_ms = run.get("durationInMs")
+            # STG_PIPELINE_RUNS.DURATION_SECONDS is DECIMAL(18,0).
+            duration_seconds = (
+                round(float(duration_ms) / 1000)
+                if duration_ms is not None
+                else None
+            )
+
+            parameters = run.get("parameters") or {}
+
+            # ADF runs do not always provide scenarioInstanceId.
+            # STG_PIPELINE_RUNS.SCENARIO_INSTANCE_ID is NOT NULL, so
+            # generate a stable, run-specific fallback when it is absent.
+            requested_scenario_id = str(
+                parameters.get("scenarioInstanceId") or ""
+            ).strip()
+            # ADF run parameters are not guaranteed to refer to a scenario
+            # registered in STG_SCENARIO_METADATA. Use a valid parent key to
+            # satisfy the Exasol foreign-key constraint.
+            scenario_instance_id = (
+                requested_scenario_id
+                if requested_scenario_id in valid_scenario_ids
+                else default_scenario_id
+            )
+
+            run_record = {
+                "RUN_ID": run_id,
+                "PIPELINE_ID": pipeline_id,
+                "SCENARIO_INSTANCE_ID": scenario_instance_id,
+                "STATUS": status,
+                "STARTED_AT": started_at,
+                "ENDED_AT": ended_at,
+                "DURATION_SECONDS": duration_seconds,
+                "SCHEMA_VERSION": "2.0.0",
+            }
+
+            if insert_if_new(
+                "STG_PIPELINE_RUNS",
+                "RUN_ID",
+                run_record,
+                {"RUN_ID", "PIPELINE_ID", "STATUS"},
+            ):
+                runs_inserted += 1
+
+            # Only create incidents for actual failures/cancellations.
+            if status not in {"FAILED", "CANCELLED"}:
+                continue
+
+            incident_record = {
+                "INCIDENT_ID": f"ADF_{run_id}",
+                "PIPELINE_ID": pipeline_id,
+                "SCENARIO_INSTANCE_ID": scenario_instance_id,
+                "OCCURRED_AT": ended_at or started_at or datetime.now(timezone.utc).replace(tzinfo=None),
+                "INCIDENT_CATEGORY": (
+                    "PIPELINE_FAILURE"
+                    if status == "FAILED"
+                    else "PIPELINE_CANCELLED"
+                ),
+                "RESOLUTION_STATUS": "OPEN",
+                "SCHEMA_VERSION": "2.0.0",
+            }
+
+            if insert_if_new(
+                "STG_INCIDENT_HISTORY",
+                "INCIDENT_ID",
+                incident_record,
+                {
+                    "INCIDENT_ID",
+                    "PIPELINE_ID",
+                    "OCCURRED_AT",
+                    "INCIDENT_CATEGORY",
+                    "RESOLUTION_STATUS",
+                },
+            ):
+                incidents_inserted += 1
+
+        # --------------------------------------------------
+        # 9. Return sync results
+        # --------------------------------------------------
+
+        return jsonify({
+            "success": True,
+            "source": "Azure Data Factory",
+            "destination_schema": schema_name,
+            "period": {
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "days": days,
+            },
+            "azure": {
+                "pipeline_definitions_fetched": len(
+                    pipeline_definitions
+                ),
+                "pipeline_runs_fetched": len(runs),
+            },
+            "inserted": {
+                "STG_PIPELINE_DEFINITIONS": definitions_inserted,
+                "STG_PIPELINE_RUNS": runs_inserted,
+                "STG_INCIDENT_HISTORY": incidents_inserted,
+            },
+            "source_mapping_fallbacks": source_fallbacks_used,
+            "unmapped_pipeline_definitions": unmapped_pipeline_definitions,
+            "unmapped_pipeline_definitions_count": len(unmapped_pipeline_definitions),
+            "skipped_pipeline_runs": skipped_pipeline_runs,
+            "skipped_pipeline_runs_count": len(skipped_pipeline_runs),
+            "note": (
+                "Existing run IDs are skipped. ADF pipeline names must match an "
+                "existing PIPELINE_NAME/PIPELINE_ID or be mapped through "
+                "ADF_PIPELINE_ID_MAP in .env. Unmapped pipelines and runs are reported "
+                "rather than inserted with invalid foreign keys. Existing run records "
+                "are not updated by this endpoint."
+            ),
+        }), 200
+
+    except requests.RequestException as exc:
+        app.logger.exception(
+            "ADF-to-Exasol synchronization failed"
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to fetch pipeline data from Azure Data Factory",
+            "details": str(exc),
+        }), 502
+
+    except Exception as exc:
+        app.logger.exception(
+            "ADF-to-Exasol synchronization failed"
+        )
+
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }), 500
+
+    finally:
+        if connection is not None:
+            connection.close()
+#===========
 # USAGE & BILLING DASHBOARD API
 # GET /api/metrics/usage-billing?days=30
 # ============================================================
@@ -417,6 +1031,14 @@ def usage_billing():
 
         end_date = datetime.now(timezone.utc).date()
         start_date = end_date - timedelta(days=days - 1)
+        cache_key = (days, end_date.isoformat())
+        now = time.time()
+        with _usage_billing_lock:
+            cached_response = _usage_billing_cache.get(cache_key)
+            if cached_response and now < cached_response["expires_at"]:
+                payload = dict(cached_response["payload"])
+                payload["cached"] = True
+                return jsonify(payload), 200
 
         token = get_azure_token()
         errors = {}
@@ -626,7 +1248,7 @@ def usage_billing():
             for row in daily
         )
 
-        return jsonify({
+        response_payload = {
             "success": (
                 billing_status == "working"
                 and pipeline_status == "working"
@@ -662,7 +1284,16 @@ def usage_billing():
                 "Confirm the returned billing currency before treating "
                 "amounts as INR."
             ),
-        }), 200
+        }
+        # Cache only fully successful responses. A partial/error response must
+        # not replace the last known good dashboard response.
+        if response_payload["success"]:
+            with _usage_billing_lock:
+                _usage_billing_cache[cache_key] = {
+                    "payload": response_payload,
+                    "expires_at": time.time() + USAGE_BILLING_CACHE_TTL,
+                }
+        return jsonify(response_payload), 200
 
     except Exception as exc:
         app.logger.exception(
@@ -2197,155 +2828,103 @@ def pipeline_metrics():
             connection.close()
 
 
-@app.get("/api/metrics/trust")
-def trust_metrics():
+@app.route("/api/trust/metrics", methods=["GET"])
+def get_trust_metrics():
+    """
+    Return Data Trust metrics from the processed and rejected Exasol tables.
+
+    The shared get_connection() helper applies the app's configured Exasol
+    connection settings, including the local self-signed certificate option
+    when EXASOL_NOCERTCHECK=true.
+    """
     connection = None
+
     try:
         connection = get_connection()
-        available = metadata_tables(connection, EXASOL_SCHEMA)
-        result = {"available": True, "tables": {}}
-        qschema = quote_identifier(EXASOL_SCHEMA)
-        names = [row["table_name"].upper() for row in available]
 
-        if "TRUST_SCORES" in names:
-            columns = metadata_columns(connection, EXASOL_SCHEMA, "TRUST_SCORES")
-            column_names = [row["column_name"].upper() for row in columns]
-            score_col = first_existing(column_names, "TRUST_SCORE", "SCORE")
-            if score_col:
-                qtable = quote_identifier("TRUST_SCORES")
-                qscore = quote_identifier(score_col)
-                rows = query_rows(
-                    connection,
-                    f"""
-                    SELECT
-                        AVG({qscore}) AS AVG_TRUST_SCORE,
-                        MIN({qscore}) AS MIN_TRUST_SCORE,
-                        MAX({qscore}) AS MAX_TRUST_SCORE,
-                        COUNT(*) AS TOTAL_RECORDS
-                    FROM {qschema}.{qtable}
-                    """,
-                )
-                result["tables"]["trust_scores"] = rows[0] if rows else {}
+        processed_result = connection.execute("""
+            SELECT COUNT(*)
+            FROM HACKATHON.SALES_PROCESSED
+        """).fetchone()
 
-        if "DATA_QUALITY_RESULTS" in names:
-            qtable = quote_identifier("DATA_QUALITY_RESULTS")
-            total_rows = query_rows(
-                connection,
-                f"SELECT COUNT(*) AS TOTAL FROM {qschema}.{qtable}",
-            )
-            quality_result = {
-                "total_checks": total_rows[0]["total"] if total_rows else 0
-            }
-            columns = metadata_columns(connection, EXASOL_SCHEMA, "DATA_QUALITY_RESULTS")
-            column_names = [row["column_name"].upper() for row in columns]
-            status_col = first_existing(column_names, "STATUS", "RESULT_STATUS")
-            if status_col:
-                groups = count_by_status(
-                    connection, EXASOL_SCHEMA, "DATA_QUALITY_RESULTS", status_col
-                )
-                quality_result["status_breakdown"] = {
-                    row["status"] or "UNKNOWN": row["total"] for row in groups
-                }
-            result["tables"]["quality_results"] = quality_result
+        rejected_result = connection.execute("""
+            SELECT COUNT(*)
+            FROM HACKATHON.SALES_REJECTED
+        """).fetchone()
 
-        if not result["tables"]:
-            result.update({
-                "available": False,
-                "message": (
-                    "Neither TRUST_SCORES nor DATA_QUALITY_RESULTS exists "
-                    "in the configured schema, or no compatible score column was found."
-                ),
-            })
+        valid_records = int(processed_result[0] or 0)
+        invalid_records = int(rejected_result[0] or 0)
+        total_records = valid_records + invalid_records
 
-        return jsonify({"success": True, "metrics": result})
-    except Exception as exc:
-        return error_response(exc)
-    finally:
-        if connection:
-            connection.close()
-
-
-@app.get("/api/metrics/cost")
-def cost_metrics():
-    connection = None
-    try:
-        connection = get_connection()
-        available = metadata_tables(connection, EXASOL_SCHEMA)
-        if not table_exists(available, "COST_USAGE_HISTORY"):
-            return jsonify({
-                "success": True,
-                "available": False,
-                "message": "COST_USAGE_HISTORY does not exist in the configured schema.",
-                "metrics": {},
-            })
-
-        columns = metadata_columns(connection, EXASOL_SCHEMA, "COST_USAGE_HISTORY")
-        column_names = [row["column_name"].upper() for row in columns]
-        qschema = quote_identifier(EXASOL_SCHEMA)
-        qtable = quote_identifier("COST_USAGE_HISTORY")
-        cost_col = first_existing(column_names, "COST_AMOUNT", "COST")
-        usage_col = first_existing(column_names, "USAGE_UNITS", "USAGE")
-        result = {}
-
-        if cost_col:
-            qcost = quote_identifier(cost_col)
-            rows = query_rows(
-                connection,
-                f"""
-                SELECT
-                    SUM({qcost}) AS TOTAL_COST,
-                    AVG({qcost}) AS AVG_COST,
-                    COUNT(*) AS RECORD_COUNT
-                FROM {qschema}.{qtable}
-                """,
-            )
-            if rows:
-                result.update(rows[0])
-
-        if usage_col:
-            qusage = quote_identifier(usage_col)
-            rows = query_rows(
-                connection,
-                f"""
-                SELECT
-                    SUM({qusage}) AS TOTAL_USAGE,
-                    AVG({qusage}) AS AVG_USAGE
-                FROM {qschema}.{qtable}
-                """,
-            )
-            if rows:
-                result.update(rows[0])
-
-        cost = result.get("total_cost")
-        usage = result.get("total_usage")
-        result["cost_per_usage_unit"] = (
-            float(cost) / float(usage)
-            if cost is not None and usage is not None and float(usage) != 0
-            else None
+        rejection_rate = (
+            round(invalid_records * 100.0 / total_records, 2)
+            if total_records else 0.0
         )
-        return jsonify({"success": True, "available": True, "metrics": result})
-    except Exception as exc:
-        return error_response(exc)
+        trust_score = (
+            round(valid_records * 100.0 / total_records, 2)
+            if total_records else 0.0
+        )
+
+        metrics = {
+            "trust_score": trust_score,
+            "total_records": total_records,
+            "valid_records": valid_records,
+            "invalid_records": invalid_records,
+            "avg_completeness": None,
+            "financial_mismatches": None,
+            "accuracy_failures": None,
+            "correctness_failures": None,
+            "missing_ids": None,
+            "rejection_rate": rejection_rate,
+            "reported_total_at_risk": None,
+            "source": (
+                "HACKATHON.SALES_PROCESSED, "
+                "HACKATHON.SALES_REJECTED"
+            ),
+            "status": (
+                "REVIEW_REQUIRED" if invalid_records else "HEALTHY"
+            ),
+            "charts": {
+                "record_distribution": [
+                    {"label": "Valid", "value": valid_records},
+                    {"label": "Invalid", "value": invalid_records},
+                ],
+                # Financial mismatches are not calculated by this endpoint.
+                # Keep the values null rather than reporting invented counts.
+                "financial_quality": [
+                    {"label": "Mismatches", "value": None},
+                    {"label": "Other records", "value": None},
+                ],
+            },
+        }
+
+        app.logger.info(
+            "Trust metrics retrieved: processed=%s, rejected=%s, total=%s",
+            valid_records,
+            invalid_records,
+            total_records,
+        )
+        return jsonify(metrics), 200
+
+    except Exception:
+        app.logger.exception("Data Trust metrics endpoint failed")
+        return jsonify({
+            "success": False,
+            "error": "Unable to retrieve Data Trust metrics from Exasol.",
+        }), 500
+
     finally:
-        if connection:
+        if connection is not None:
             connection.close()
-
-@app.errorhandler(404)
-def not_found(_error):
-    return jsonify({
-        "success": False,
-        "error": {"code": "NOT_FOUND", "message": "Endpoint not found."},
-    }), 404
-
-
-# ==================== RAG API CONFIGURATION ====================
 
 import os
 import re
 import json
 import requests
+from uuid import uuid4
 
 from flask import request, jsonify
+
 
 OLLAMA_URL = os.getenv(
     "OLLAMA_URL", "http://127.0.0.1:11434"
@@ -2355,8 +2934,8 @@ OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL", "llama3:latest"
 )
 OLLAMA_BASE_URL = os.getenv(
-    "OLLAMA_BASE_URL", "http://127.0.0.1:11434"
-)
+    "OLLAMA_BASE_URL", OLLAMA_URL
+).rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3:latest")
 OLLAMA_TIMEOUT_SECONDS = int(
     os.getenv("OLLAMA_TIMEOUT_SECONDS", "120")
@@ -2439,98 +3018,14 @@ def ollama_chat_api():
             "success": False,
             "error": str(exc),
         }), 502
-from uuid import uuid4
-
-@app.route("/api/adf/explain-error", methods=["POST", "OPTIONS"])
-def explain_adf_error():
-    if request.method == "OPTIONS":
-        return "", 204
-
-    body = request.get_json(silent=True) or {}
-
-    activity = body.get("activity") or {}
-    if not isinstance(activity, dict):
-        activity = {}
-
-    error = activity.get("error") or {}
-    if isinstance(error, dict):
-        error_message = error.get("message", "")
-        error_code = error.get("errorCode", "")
-    else:
-        error_message = str(error)
-        error_code = ""
-
-    error_message = (
-        error_message
-        or body.get("pipeline_message")
-        or "No detailed error message was returned."
-    )
-
-    diagnostic_input = {
-        "pipeline_name": body.get("pipeline_name", "Unknown"),
-        "run_id": body.get("run_id", ""),
-        "pipeline_status": body.get("pipeline_status", "Failed"),
-        "activity_name": activity.get("activity_name", "Pipeline"),
-        "activity_type": activity.get("activity_type", ""),
-        "error_code": str(error_code),
-        "error_message": str(error_message),
-        "activity_output": activity.get("output", ""),
-    }
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an Azure Data Factory troubleshooting assistant. "
-                "Analyze the provided error without inventing facts. "
-                "Return only valid JSON containing these string fields: "
-                "error_code, error_message, likely_cause, "
-                "recommended_solution, next_action, confidence_note."
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(diagnostic_input, default=str),
-        },
-    ]
-
-    try:
-        answer = ollama_chat(messages, json_mode=True)
-        diagnostic = json.loads(answer)
-
-        diagnostic.setdefault("error_code", str(error_code or "Not provided"))
-        diagnostic.setdefault("error_message", str(error_message))
-        diagnostic.setdefault("likely_cause", "Root cause requires verification.")
-        diagnostic.setdefault(
-            "recommended_solution",
-            "Inspect the failed activity output in ADF Monitor.",
-        )
-        diagnostic.setdefault(
-            "next_action",
-            "Verify the cause, apply the fix, and rerun the pipeline.",
-        )
-        diagnostic.setdefault(
-            "confidence_note",
-            "AI-generated suggestion; verify against Azure logs.",
-        )
-
-        diagnostic["pipeline_name"] = diagnostic_input["pipeline_name"]
-        diagnostic["activity_name"] = diagnostic_input["activity_name"]
-
-        return jsonify({"success": True, "diagnostic": diagnostic})
-
-    except (RuntimeError, json.JSONDecodeError) as exc:
-        app.logger.exception("Ollama error diagnosis failed")
-        return jsonify({"success": False, "error": str(exc)}), 502
-# ==================== RAG API ====================
-
-@app.post("/api/rag/sql-query")
+@app.route("/api/rag/sql-query", methods=["POST"], strict_slashes=False)
+@app.route("/api/rag/query", methods=["POST"], strict_slashes=False)
 def rag_query():
     connection = None
 
     try:
         payload = request.get_json(silent=True) or {}
-        question = payload.get("question", "")
+        question = payload.get("question", payload.get("query", ""))
 
         if not isinstance(question, str) or not question.strip():
             return jsonify({
@@ -2613,17 +3108,24 @@ Rules:
             timeout=180
         )
         response.raise_for_status()
-
+        
         sql = response.json()["message"]["content"].strip()
-        sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.I)
-        sql = re.sub(r"\s*```$", "", sql).strip()
 
-        # 3. Validate generated SQL
+        # Remove Markdown fences sometimes returned by Ollama.
+        sql = re.sub(r"^\s*```(?:sql)?\s*", "", sql, flags=re.I)
+        sql = re.sub(r"\s*```\s*$", "", sql).strip()
+
+        # Remove one trailing statement terminator, if present.
+        # Semicolons anywhere else remain prohibited.
+        if sql.endswith(";"):
+            sql = sql[:-1].rstrip()
+
         if not re.match(r"^(SELECT|WITH)\b", sql, re.I):
             raise ValueError("Only SELECT queries are permitted.")
 
         if any(token in sql for token in (";", "--", "/*", "*/")):
             raise ValueError("Multiple statements or SQL comments rejected.")
+
 
         forbidden = re.compile(
             r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|"
@@ -2665,8 +3167,90 @@ Rules:
         if not re.search(r"\bLIMIT\s+\d+\b", sql, re.I):
             sql += " LIMIT 100"
 
-        # 4. Execute query against Exasol
-        rows = query_rows(connection, sql)
+        # 4. Execute query against Exasol.
+        # If Ollama invents a column or produces invalid SQL, send the exact
+        # Exasol error and the live schema back to Ollama for one correction.
+        try:
+            rows = query_rows(connection, sql)
+        except Exception as first_sql_error:
+            app.logger.warning(
+                "Ollama-generated SQL failed; requesting one schema-grounded correction: %s",
+                str(first_sql_error)[:1000],
+            )
+
+            correction_prompt = f"""
+Correct the failed Exasol SQL using only the exact live schema below.
+Return one read-only SELECT query only, without Markdown, comments, or semicolons.
+Do not invent table or column names. Qualify tables with {EXASOL_SCHEMA}.
+Include LIMIT 100.
+
+LIVE SCHEMA:
+{chr(10).join(schema_parts)}
+
+USER QUESTION:
+{question}
+
+FAILED SQL:
+{sql}
+
+EXASOL ERROR:
+{str(first_sql_error)[:2000]}
+"""
+            correction_response = requests.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You repair Exasol SQL using supplied live schema metadata. "
+                                "Never invent identifiers. Return SQL only."
+                            ),
+                        },
+                        {"role": "user", "content": correction_prompt},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0},
+                },
+                timeout=OLLAMA_TIMEOUT_SECONDS,
+            )
+            correction_response.raise_for_status()
+            sql = correction_response.json().get("message", {}).get("content", "").strip()
+            sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.I)
+            sql = re.sub(r"\s*```$", "", sql).strip()
+
+            if not re.match(r"^(SELECT|WITH)\b", sql, re.I):
+                raise ValueError("Ollama correction was not a read-only SELECT query.")
+
+            if any(token in sql for token in (";", "--", "/*", "*/")):
+                raise ValueError("Ollama correction contained a semicolon or SQL comment.")
+
+            if forbidden.search(sql):
+                raise ValueError("Unsafe SQL operation rejected after Ollama correction.")
+
+            corrected_matches = list(table_pattern.finditer(sql))
+            if not corrected_matches:
+                raise ValueError("No approved table found in corrected SQL.")
+
+            for match in corrected_matches:
+                schema_name, table_name = match.groups()
+                if schema_name and schema_name.upper() != EXASOL_SCHEMA:
+                    raise ValueError(
+                        f"Access to schema '{schema_name}' is forbidden. "
+                        f"Allowed schema: {EXASOL_SCHEMA}"
+                    )
+                if table_name.upper() not in allowed_tables:
+                    raise ValueError(
+                        f"Table '{table_name}' is not available "
+                        f"in schema '{EXASOL_SCHEMA}'."
+                    )
+
+            if not re.search(r"\bLIMIT\s+\d+\b", sql, re.I):
+                sql += " LIMIT 100"
+
+            # Execute the corrected query once. If it still fails, report it.
+            rows = query_rows(connection, sql)
 
         connection.close()
         connection = None
@@ -2741,26 +3325,9 @@ Rules:
 # and BEFORE if __name__ == "__main__".
 # ============================================================
 
-import json
-from uuid import uuid4
-
-import requests
-from flask import jsonify, request
-
-
 # ------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------
-
-# Reuse OLLAMA_URL and OLLAMA_MODEL from your existing app.py.
-# These defaults are used only if they have not been configured.
-OLLAMA_URL = os.getenv(
-    "OLLAMA_URL", "http://127.0.0.1:11434"
-).rstrip("/")
-
-OLLAMA_MODEL = os.getenv(
-    "OLLAMA_MODEL", "llama3:latest"
-)
 
 REQUEST_TABLE = "HACKATHON.DATA_REQUESTS"
 
@@ -2799,7 +3366,8 @@ Rules:
 - Do not assume the user's permissions or data sensitivity.
 - Use UNDER REVIEW when information is insufficient.
 - Do not approve a request based on priority alone.
-- Keep reasoning concise.
+- Keep reasoning to exactly five words.
+- State whether the justification is clear or unclear.
 """
 
     response = requests.post(
@@ -3182,6 +3750,585 @@ def list_api_routes():
             key=lambda item: item["path"],
         ),
     }), 200
+
+
+@app.route("/api/adf/explain-error", methods=["POST", "OPTIONS"])
+def explain_adf_error():
+    if request.method == "OPTIONS":
+        return "", 204
+
+    body = request.get_json(silent=True) or {}
+
+    activity = body.get("activity") or {}
+    if not isinstance(activity, dict):
+        activity = {}
+
+    error = activity.get("error") or {}
+    if isinstance(error, dict):
+        error_message = error.get("message", "")
+        error_code = error.get("errorCode", "")
+    else:
+        error_message = str(error)
+        error_code = ""
+
+    error_message = (
+        error_message
+        or body.get("pipeline_message")
+        or "No detailed error message was returned."
+    )
+
+    diagnostic_input = {
+        "pipeline_name": body.get("pipeline_name", "Unknown"),
+        "run_id": body.get("run_id", ""),
+        "pipeline_status": body.get("pipeline_status", "Failed"),
+        "activity_name": activity.get("activity_name", "Pipeline"),
+        "activity_type": activity.get("activity_type", ""),
+        "error_code": str(error_code),
+        "error_message": str(error_message),
+        "activity_output": activity.get("output", ""),
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an Azure Data Factory troubleshooting assistant. "
+                "Analyze the provided error without inventing facts. "
+                "Return only valid JSON containing these string fields: "
+                "error_code, error_message, likely_cause, "
+                "recommended_solution, next_action, confidence_note."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(diagnostic_input, default=str),
+        },
+    ]
+
+    try:
+        answer = ollama_chat(messages, json_mode=True)
+        diagnostic = json.loads(answer)
+
+        diagnostic.setdefault("error_code", str(error_code or "Not provided"))
+        diagnostic.setdefault("error_message", str(error_message))
+        diagnostic.setdefault("likely_cause", "Root cause requires verification.")
+        diagnostic.setdefault(
+            "recommended_solution",
+            "Inspect the failed activity output in ADF Monitor.",
+        )
+        diagnostic.setdefault(
+            "next_action",
+            "Verify the cause, apply the fix, and rerun the pipeline.",
+        )
+        diagnostic.setdefault(
+            "confidence_note",
+            "AI-generated suggestion; verify against Azure logs.",
+        )
+
+        diagnostic["pipeline_name"] = diagnostic_input["pipeline_name"]
+        diagnostic["activity_name"] = diagnostic_input["activity_name"]
+
+        return jsonify({"success": True, "diagnostic": diagnostic})
+
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        app.logger.exception("Ollama error diagnosis failed")
+        return jsonify({"success": False, "error": str(exc)}), 502
+
+# ============================================================
+# UNIFIED AZURE -> EXASOL STAGING SYNCHRONIZATION
+# POST /api/azure/sync-all-to-exasol?days=30
+#
+# Loads:
+#   - Azure Data Factory pipeline definitions -> STG_PIPELINE_DEFINITIONS
+#   - Azure Data Factory runs              -> STG_PIPELINE_RUNS
+#   - Failed/cancelled runs                -> STG_INCIDENT_HISTORY
+#   - Daily Azure costs                    -> STG_DATASET_OBSERVATIONS
+#   - Daily pipeline usage metrics         -> STG_DATASET_OBSERVATIONS
+#   - Dataset metadata                     -> STG_DATASETS
+#
+# Existing IDs are skipped, making repeated runs safe.
+# ============================================================
+
+@app.post("/api/azure/sync-all-to-exasol")
+def sync_all_azure_to_exasol():
+    connection = None
+    try:
+        days = request.args.get("days", default=30, type=int)
+        if days is None or not 1 <= days <= 90:
+            return jsonify({
+                "success": False,
+                "error": "days must be between 1 and 90",
+            }), 400
+
+        token = get_azure_token()
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=days - 1)
+
+        # Fetch the actual source data from Azure.
+        pipeline_runs = fetch_pipeline_runs(token, start_date, end_date)
+        definitions_url = (
+            f"{ARM}/subscriptions/{SUBSCRIPTION_ID}"
+            f"/resourceGroups/{RESOURCE_GROUP}"
+            f"/providers/Microsoft.DataFactory/factories/"
+            f"{DATA_FACTORY}/pipelines"
+        )
+        definitions_response = requests.get(
+            definitions_url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"api-version": API_VERSION},
+            timeout=45,
+        )
+        definitions_response.raise_for_status()
+        pipeline_definitions = definitions_response.json().get("value", [])
+
+        # Costs are loaded independently so a billing API issue is reported
+        # clearly rather than silently creating fake zero-cost records.
+        billing_error = None
+        try:
+            daily_costs = fetch_daily_cost(token, start_date, end_date)
+            billing_status = "working"
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            app.logger.exception("Cost retrieval failed during unified sync")
+            daily_costs = {}
+            billing_status = "unavailable"
+            billing_error = str(exc)
+
+        connection = get_connection()
+        schema = "HACKATHON"
+        qschema = quote_identifier(schema)
+        existing_tables = {
+            row["table_name"].upper()
+            for row in metadata_tables(connection, schema)
+        }
+        required_tables = {
+            "STG_DATASETS",
+            "STG_DATASET_OBSERVATIONS",
+            "STG_PIPELINE_DEFINITIONS",
+            "STG_PIPELINE_RUNS",
+            "STG_INCIDENT_HISTORY",
+            "STG_SCENARIO_METADATA",
+        }
+        missing = sorted(required_tables - existing_tables)
+        if missing:
+            return jsonify({
+                "success": False,
+                "error": "Required Exasol tables are missing",
+                "missing_tables": missing,
+                "hint": "Create the missing tables using the supplied HACKATHON staging schema.",
+            }), 400
+
+        # Resolve scenario foreign keys using the actual parent table values.
+        scenario_metadata_table = f"{qschema}.{quote_identifier('STG_SCENARIO_METADATA')}"
+        scenario_rows = query_rows(
+            connection,
+            f"SELECT SCENARIO_INSTANCE_ID FROM {scenario_metadata_table}"
+        )
+        valid_scenario_ids = {
+            str(row.get("scenario_instance_id")).strip()
+            for row in scenario_rows
+            if row.get("scenario_instance_id") is not None
+            and str(row.get("scenario_instance_id")).strip()
+        }
+        if not valid_scenario_ids:
+            raise ValueError(
+                "STG_SCENARIO_METADATA has no SCENARIO_INSTANCE_ID values. "
+                "Insert at least one valid scenario metadata row before syncing ADF runs."
+            )
+        default_scenario_id = sorted(valid_scenario_ids)[0]
+
+        columns_cache = {}
+
+        def table_columns(table):
+            if table not in columns_cache:
+                columns_cache[table] = {
+                    row["column_name"].upper()
+                    for row in metadata_columns(connection, schema, table)
+                }
+            return columns_cache[table]
+
+        def literal(value):
+            if value is None:
+                return "NULL"
+            if isinstance(value, bool):
+                return "TRUE" if value else "FALSE"
+            if isinstance(value, datetime):
+                if value.tzinfo:
+                    value = value.astimezone(timezone.utc).replace(tzinfo=None)
+                stamp = value.strftime("%Y-%m-%d %H:%M:%S.%f")
+                return f"CAST('{stamp}' AS TIMESTAMP)"
+            if isinstance(value, date):
+                return f"CAST('{value.isoformat()} 00:00:00' AS TIMESTAMP)"
+            if isinstance(value, Decimal):
+                return str(value) if value.is_finite() else "NULL"
+            if isinstance(value, int):
+                return str(value)
+            if isinstance(value, float):
+                return repr(value) if math.isfinite(value) else "NULL"
+            return "'" + str(value).replace("'", "''") + "'"
+
+        def insert_if_missing(table, key, record, required):
+            actual_columns = table_columns(table)
+            missing_columns = set(required) - actual_columns
+            if missing_columns:
+                raise ValueError(
+                    f"{table} is missing required columns: {sorted(missing_columns)}"
+                )
+            if record.get(key) in (None, ""):
+                raise ValueError(f"Cannot insert {table}: {key} is empty")
+
+            qtable = f"{qschema}.{quote_identifier(table)}"
+            qkey = quote_identifier(key)
+            key_value = literal(record[key])
+            check = connection.execute(
+                f"SELECT 1 FROM {qtable} WHERE {qkey} = {key_value} LIMIT 1"
+            )
+            try:
+                if check.fetchone() is not None:
+                    return False
+            finally:
+                check.close()
+
+            names = [name for name in record if name.upper() in actual_columns]
+            values = [literal(record[name]) for name in names]
+            sql = (
+                f"INSERT INTO {qtable} "
+                f"({', '.join(quote_identifier(n) for n in names)}) "
+                f"VALUES ({', '.join(values)})"
+            )
+            statement = connection.execute(sql)
+            statement.close()
+            return True
+
+        # Source IDs are based on the existing source catalog. The endpoint
+        # does not invent a new source ID if SRC001 is absent.
+        source_rows = query_rows(
+            connection,
+            f"SELECT SOURCE_ID FROM {qschema}.{quote_identifier('STG_DATA_SOURCES')}"
+        ) if "STG_DATA_SOURCES" in existing_tables else []
+        source_ids = [row.get("source_id") for row in source_rows if row.get("source_id")]
+        if not source_ids:
+            raise ValueError(
+                "STG_DATA_SOURCES has no source IDs. Add a valid source such as SRC001 first."
+            )
+        source_id = "SRC001" if "SRC001" in source_ids else source_ids[0]
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        schema_version = "2.0.0"
+
+        # Register datasets for the two daily observation streams.
+        dataset_specs = [
+            ("DS_AZURE_COST_DAILY", "Azure Daily Cost", "COST"),
+            ("DS_ADF_USAGE_DAILY", "ADF Daily Pipeline Usage", "PIPELINE"),
+        ]
+        for dataset_id, dataset_name, domain in dataset_specs:
+            insert_if_missing(
+                "STG_DATASETS",
+                "DATASET_ID",
+                {
+                    "DATASET_ID": dataset_id,
+                    "DATASET_NAME": dataset_name,
+                    "DOMAIN": domain,
+                    "SOURCE_ID": source_id,
+                    "SCHEMA_VERSION": schema_version,
+                },
+                {"DATASET_ID", "DATASET_NAME", "DOMAIN", "SOURCE_ID", "SCHEMA_VERSION"},
+            )
+
+        # Resolve ADF pipeline names only to registered parent IDs. Do not
+        # create a new ID from an Azure display name because run rows have FKs.
+        definition_rows = query_rows(
+            connection,
+            f"""SELECT PIPELINE_ID, PIPELINE_NAME, SOURCE_ID
+                FROM {qschema}.{quote_identifier('STG_PIPELINE_DEFINITIONS')}"""
+        )
+        id_by_name = {
+            str(row["pipeline_name"]): str(row["pipeline_id"]).strip()
+            for row in definition_rows
+            if row.get("pipeline_name") and row.get("pipeline_id")
+        }
+        id_by_normalized_name = {
+            str(row["pipeline_name"]).strip().casefold(): str(row["pipeline_id"]).strip()
+            for row in definition_rows
+            if row.get("pipeline_name") and row.get("pipeline_id")
+        }
+        valid_pipeline_ids = {
+            str(row.get("pipeline_id")).strip()
+            for row in definition_rows
+            if row.get("pipeline_id") is not None and str(row.get("pipeline_id")).strip()
+        }
+        explicit_pipeline_map = load_adf_pipeline_id_map()
+        unmapped_pipeline_definitions = []
+        for definition in pipeline_definitions:
+            name = definition.get("name")
+            if not name:
+                continue
+            normalized_name = str(name).strip().casefold()
+            mapped_id = explicit_pipeline_map.get(normalized_name) or id_by_normalized_name.get(normalized_name)
+            if mapped_id is None and str(name).strip() in valid_pipeline_ids:
+                mapped_id = str(name).strip()
+            if mapped_id and mapped_id in valid_pipeline_ids:
+                id_by_name[name] = mapped_id
+            else:
+                unmapped_pipeline_definitions.append({
+                    "pipeline_name": name,
+                    "reason": (
+                        "No matching existing PIPELINE_ID. Add the correct mapping "
+                        "to ADF_PIPELINE_ID_MAP or register the pipeline in "
+                        "STG_PIPELINE_DEFINITIONS first."
+                    ),
+                })
+
+        inserted = {
+            "STG_DATASETS": 0,
+            "STG_DATASET_OBSERVATIONS": 0,
+            "STG_PIPELINE_DEFINITIONS": 0,
+            "STG_PIPELINE_RUNS": 0,
+            "STG_INCIDENT_HISTORY": 0,
+        }
+
+        # Parent IDs were validated from STG_PIPELINE_DEFINITIONS above.
+        skipped_pipeline_runs = []
+        observation_context_by_day = {}
+        skipped_observation_days = []
+
+        runs_by_day = {}
+        for run in pipeline_runs:
+            run_id = run.get("runId")
+            name = run.get("pipelineName")
+            if not run_id or not name:
+                continue
+            pipeline_id = (
+                id_by_name.get(name)
+                or explicit_pipeline_map.get(str(name).strip().casefold())
+                or id_by_normalized_name.get(str(name).strip().casefold())
+            )
+            if pipeline_id is None or str(pipeline_id).strip() not in valid_pipeline_ids:
+                skipped_pipeline_runs.append({
+                    "run_id": run_id,
+                    "pipeline_name": name,
+                    "reason": "No matching PIPELINE_ID exists in STG_PIPELINE_DEFINITIONS",
+                })
+                app.logger.warning(
+                    "Skipping ADF run %s: pipeline '%s' has no valid parent definition",
+                    run_id, name,
+                )
+                continue
+            status = str(run.get("status") or "UNKNOWN").upper()
+
+            def parse_azure_timestamp(value):
+                if not value:
+                    return None
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo:
+                    parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                return parsed
+
+            started = parse_azure_timestamp(run.get("runStart"))
+            ended = parse_azure_timestamp(run.get("runEnd"))
+            if started is None:
+                skipped_pipeline_runs.append({
+                    "run_id": run_id,
+                    "pipeline_name": name,
+                    "reason": "ADF run has no runStart; STARTED_AT is required by Exasol.",
+                })
+                continue
+            duration_ms = run.get("durationInMs")
+            duration_seconds = (
+                round(float(duration_ms) / 1000)
+                if duration_ms is not None else None
+            )
+            parameters = run.get("parameters") or {}
+            requested_scenario_id = str(
+                parameters.get("scenarioInstanceId") or ""
+            ).strip()
+            scenario_id = (
+                requested_scenario_id
+                if requested_scenario_id in valid_scenario_ids
+                else default_scenario_id
+            )
+            if insert_if_missing(
+                "STG_PIPELINE_RUNS",
+                "RUN_ID",
+                {
+                    "RUN_ID": run_id,
+                    "PIPELINE_ID": pipeline_id,
+                    "SCENARIO_INSTANCE_ID": scenario_id,
+                    "STATUS": status,
+                    "STARTED_AT": started,
+                    "ENDED_AT": ended,
+                    "DURATION_SECONDS": duration_seconds,
+                    "SCHEMA_VERSION": schema_version,
+                },
+                {"RUN_ID", "PIPELINE_ID", "STATUS"},
+            ):
+                inserted["STG_PIPELINE_RUNS"] += 1
+
+            if started:
+                day = started.date().isoformat()
+                runs_by_day.setdefault(day, []).append(run)
+                observation_context_by_day.setdefault(day, []).append({
+                    "run_id": run_id,
+                    "scenario_id": scenario_id,
+                })
+
+            if status in {"FAILED", "CANCELLED"}:
+                incident_time = ended or started or now
+                if insert_if_missing(
+                    "STG_INCIDENT_HISTORY",
+                    "INCIDENT_ID",
+                    {
+                        "INCIDENT_ID": f"ADF_{run_id}",
+                        "PIPELINE_ID": pipeline_id,
+                        "SCENARIO_INSTANCE_ID": scenario_id,
+                        "OCCURRED_AT": incident_time,
+                        "INCIDENT_CATEGORY": (
+                            "PIPELINE_FAILURE" if status == "FAILED"
+                            else "PIPELINE_CANCELLED"
+                        ),
+                        "RESOLUTION_STATUS": "OPEN",
+                        "SCHEMA_VERSION": schema_version,
+                    },
+                    {
+                        "INCIDENT_ID", "PIPELINE_ID", "OCCURRED_AT",
+                        "INCIDENT_CATEGORY", "RESOLUTION_STATUS",
+                    },
+                ):
+                    inserted["STG_INCIDENT_HISTORY"] += 1
+
+        # One daily observation per dataset/date/metric. The observation ID
+        # is deterministic so retries do not duplicate data.
+        for offset in range(days):
+            day = start_date + timedelta(days=offset)
+            day_text = day.isoformat()
+            window_start = datetime.combine(day, datetime.min.time())
+            window_end = window_start + timedelta(days=1)
+            day_runs = runs_by_day.get(day_text, [])
+            total_runs = len(day_runs)
+            succeeded = sum(
+                str(r.get("status") or "").lower() == "succeeded"
+                for r in day_runs
+            )
+            failed = sum(
+                str(r.get("status") or "").lower() == "failed"
+                for r in day_runs
+            )
+
+            # Observations use a real run ID and valid scenario ID. If there is
+            # no registered run on this date, skip instead of inventing an ID
+            # that may violate STG_DATASET_OBSERVATIONS foreign keys.
+            day_contexts = observation_context_by_day.get(day_text, [])
+            if not day_contexts:
+                skipped_observation_days.append({
+                    "date": day_text,
+                    "reason": (
+                        "No valid registered ADF run for this date; observation "
+                        "was skipped to preserve RUN_ID referential integrity."
+                    ),
+                })
+                continue
+            observation_run_id = day_contexts[0]["run_id"]
+            observation_scenario_id = day_contexts[0]["scenario_id"]
+
+            metrics = []
+            if billing_status == "working" and day_text in daily_costs:
+                metrics.append((
+                    "DS_AZURE_COST_DAILY",
+                    "AZURE_DAILY_COST",
+                    float(daily_costs[day_text]),
+                    1,
+                ))
+            metrics.extend([
+                ("DS_ADF_USAGE_DAILY", "ADF_PIPELINE_RUN_COUNT", total_runs, total_runs),
+                ("DS_ADF_USAGE_DAILY", "ADF_PIPELINE_SUCCEEDED_COUNT", succeeded, total_runs),
+                ("DS_ADF_USAGE_DAILY", "ADF_PIPELINE_FAILED_COUNT", failed, total_runs),
+            ])
+
+            for dataset_id, metric_name, metric_value, expected in metrics:
+                observation_id = (
+                    f"{dataset_id}_{day.strftime('%Y%m%d')}_{metric_name}"
+                )
+                record = {
+                    "OBSERVATION_ID": observation_id,
+                    "DATASET_ID": dataset_id,
+                    "RUN_ID": observation_run_id,
+                    "SCENARIO_INSTANCE_ID": observation_scenario_id,
+                    "OBSERVED_AT": now,
+                    "WINDOW_START": window_start,
+                    "WINDOW_END": window_end,
+                    "ROW_COUNT": int(metric_value) if metric_name != "AZURE_DAILY_COST" else 1,
+                    "EXPECTED_ROW_COUNT": int(expected),
+                    "FRESHNESS_LAG_SECONDS": 0,
+                    "COMPLETENESS_RATIO": 1.0 if expected else 1.0,
+                    "METRIC_NAME": metric_name,
+                    "METRIC_VALUE": metric_value,
+                    "SCHEMA_VERSION": schema_version,
+                }
+                if insert_if_missing(
+                    "STG_DATASET_OBSERVATIONS",
+                    "OBSERVATION_ID",
+                    record,
+                    {
+                        "OBSERVATION_ID", "DATASET_ID", "RUN_ID",
+                        "SCENARIO_INSTANCE_ID", "OBSERVED_AT", "WINDOW_START",
+                        "WINDOW_END", "ROW_COUNT", "EXPECTED_ROW_COUNT",
+                        "FRESHNESS_LAG_SECONDS", "COMPLETENESS_RATIO",
+                        "METRIC_NAME", "METRIC_VALUE", "SCHEMA_VERSION",
+                    },
+                ):
+                    inserted["STG_DATASET_OBSERVATIONS"] += 1
+
+        return jsonify({
+            "success": True,
+            "source": {
+                "data_factory": DATA_FACTORY,
+                "resource_group": RESOURCE_GROUP,
+                "subscription_scope": f"subscription/{SUBSCRIPTION_ID}",
+            },
+            "destination_schema": schema,
+            "period": {"from": start_date.isoformat(), "to": end_date.isoformat(), "days": days},
+            "fetched": {
+                "pipeline_definitions": len(pipeline_definitions),
+                "pipeline_runs": len(pipeline_runs),
+                "daily_cost_records": len(daily_costs),
+            },
+            "billing_status": billing_status,
+            "billing_error": billing_error,
+            "inserted": inserted,
+            "unmapped_pipeline_definitions": unmapped_pipeline_definitions,
+            "unmapped_pipeline_definitions_count": len(unmapped_pipeline_definitions),
+            "skipped_pipeline_runs": skipped_pipeline_runs,
+            "skipped_pipeline_runs_count": len(skipped_pipeline_runs),
+            "skipped_observation_days": skipped_observation_days,
+            "skipped_observation_days_count": len(skipped_observation_days),
+            "note": (
+                "Existing IDs are skipped. ADF pipeline names must map to existing "
+                "PIPELINE_ID values by matching PIPELINE_NAME/PIPELINE_ID or using "
+                "ADF_PIPELINE_ID_MAP in .env. Unmapped pipelines/runs are reported "
+                "instead of inserted with invalid foreign keys. Daily observations "
+                "require a real registered run on that date; skipped dates are reported. "
+                "Cost observations are written only for dates returned by Azure; missing "
+                "cost dates are not treated as zero. Azure cost totals are subscription-level "
+                "daily totals and are not directly attributed to individual pipeline runs."
+            ),
+        }), 200
+
+    except requests.RequestException as exc:
+        app.logger.exception("Unified Azure-to-Exasol sync failed")
+        return jsonify({
+            "success": False,
+            "error": "Azure API request failed",
+            "details": str(exc),
+        }), 502
+    except Exception as exc:
+        app.logger.exception("Unified Azure-to-Exasol sync failed")
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }), 500
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 if __name__ == "__main__":

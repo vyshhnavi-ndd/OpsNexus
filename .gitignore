@@ -1,2 +1,4 @@
 
 backend/.env
+exasol-dashboard/node_modules
+Deployment/exasol.exe

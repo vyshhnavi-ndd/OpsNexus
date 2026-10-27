@@ -1,10 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import {
-  Activity, ShieldCheck, Wallet, MessageSquare, Database, Bell, Search,
-  RefreshCw, CheckCircle2, XCircle, Clock3, AlertTriangle, Menu, X, Server,
-  Zap, FileText, LayoutDashboard, Settings2
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  Clock3,
+  Database,
+  FileText,
+  LayoutDashboard,
+  MessageSquare,
+  RefreshCw,
+  Server,
+  ShieldCheck,
+  Moon,
+  Sun,
+  Wallet,
+  X,
+  XCircle,
+  Zap,
 } from "lucide-react";
+import ExasolDatabase from "./pages/ExasolDatabase";
+import TrustCard from "./components/TrustCard";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Topbar from "./components/Topbar";
@@ -13,13 +29,23 @@ import Badge from "./components/Badge";
 import Card from "./components/Card";
 import SectionTitle from "./components/SectionTitle";
 import PipelineTable from "./components/PipelineTable";
-import TrustCard from "./components/TrustCard";
-import CostChart from "./components/CostChart";
-import ExasolDatabase from "./pages/ExasolDatabase";
 import ChatPage from "./pages/ChatPage";
 import RequestsPage from "./pages/RequestsPage";
+import UsageBillingDashboard from "./components/UsageBillingDashboard";
 
 const API = "http://127.0.0.1:5000/api";
+const DEFAULT_SCHEMA = "HACKATHON";
+const DEFAULT_HISTORY_DAYS = 7;
+
+// Share simultaneous GET requests (including React StrictMode's development replay).
+const inFlightGets = new Map();
+function getDeduplicated(url, config = {}) {
+  const key = `${url}?${JSON.stringify(config.params || {})}`;
+  if (inFlightGets.has(key)) return inFlightGets.get(key);
+  const request = axios.get(url, config).finally(() => inFlightGets.delete(key));
+  inFlightGets.set(key, request);
+  return request;
+}
 const NAV = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "pipelines", label: "Pipeline Reliability", icon: Activity },
@@ -27,252 +53,801 @@ const NAV = [
   { id: "cost", label: "Cost Intelligence", icon: Wallet },
   { id: "chat", label: "Data Assistant", icon: MessageSquare },
   { id: "requests", label: "Data Requests", icon: FileText },
-  { id: "database", label: "Exasol Database", icon: Database }
+  { id: "database", label: "Exasol Database", icon: Database },
 ];
-const DEMO = {
-  pipelines: [
-    { name: "Customer ETL", source: "Azure Data Factory", status: "SUCCESS", duration: 142, time: "09:42", sla: "On time" },
-    { name: "Sales Warehouse", source: "Exasol", status: "FAILED", duration: 310, time: "09:35", sla: "Breached" },
-    { name: "Inventory Sync", source: "Azure Data Factory", status: "RUNNING", duration: 85, time: "09:30", sla: "On time" },
-    { name: "Finance Aggregation", source: "Exasol", status: "SUCCESS", duration: 196, time: "09:15", sla: "On time" },
-    { name: "Marketing Analytics", source: "Python ETL", status: "FAILED", duration: 422, time: "08:50", sla: "Breached" }
-  ],
-  trend: [
-    { day: "Mon", success: 92, failures: 8 }, { day: "Tue", success: 96, failures: 4 },
-    { day: "Wed", success: 88, failures: 12 }, { day: "Thu", success: 97, failures: 3 },
-    { day: "Fri", success: 91, failures: 9 }, { day: "Sat", success: 98, failures: 2 },
-    { day: "Sun", success: 94, failures: 6 }
-  ],
-  trust: [
-    { name: "Customer Sales", score: 96, owner: "Analytics", freshness: "5 min ago", status: "Trusted" },
-    { name: "Product Inventory", score: 82, owner: "Operations", freshness: "2 hours ago", status: "Review" },
-    { name: "Finance KPIs", score: 61, owner: "Finance", freshness: "Yesterday", status: "At risk" },
-    { name: "Marketing Events", score: 93, owner: "Marketing", freshness: "15 min ago", status: "Trusted" }
-  ],
-  costs: [
-    { day: "Mon", cost: 320, usage: 290 }, { day: "Tue", cost: 350, usage: 330 },
-    { day: "Wed", cost: 410, usage: 350 }, { day: "Thu", cost: 390, usage: 370 },
-    { day: "Fri", cost: 490, usage: 380 }, { day: "Sat", cost: 450, usage: 410 },
-    { day: "Sun", cost: 520, usage: 420 }
-  ]
+
+const EMPTY_REQUEST_FORM = {
+  dataset: "",
+  reason: "",
+  priority: "Medium",
 };
-const num = (v) => v == null || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
-const pct = (v) => v == null ? "—" : `${num(v)}%`;
+
+const INITIAL_MESSAGES = [
+  {
+    role: "assistant",
+    text: "Hello! Ask me about pipeline failures, dataset trust, platform costs, or data requests.",
+  },
+];
+
+function formatNumber(value, digits = 0) {
+  if (value == null || value === "" || !Number.isFinite(Number(value))) {
+    return "—";
+  }
+
+  return Number(value).toLocaleString("en-IN", {
+    maximumFractionDigits: digits,
+  });
+}
+
+function formatPercent(value) {
+  return value == null || value === "" ? "—" : `${formatNumber(value, 1)}%`;
+}
+
+function getErrorMessage(error, fallback) {
+  return (
+    error?.response?.data?.error ||
+    error?.response?.data?.message ||
+    error?.message ||
+    fallback
+
+  );
+}
+
+function countRuns(runs) {
+  const successful = runs.filter((run) => run.status === "Succeeded").length;
+  const failed = runs.filter((run) => run.status === "Failed").length;
+  const running = runs.filter((run) =>
+    ["InProgress", "Queued", "Waiting"].includes(run.status)
+  ).length;
+
+  return {
+    total: runs.length,
+    successful,
+    failed,
+    running,
+    successRate: runs.length ? (successful / runs.length) * 100 : null,
+  };
+}
+
+function countTriggerType(runs, type) {
+  return runs.filter((run) => run.invoked_by?.invokedByType === type).length;
+}
 
 export default function App() {
   const [page, setPage] = useState("overview");
+  const [theme, setTheme] = useState(() => localStorage.getItem("exasol-theme") || "light");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
+
   const [apiState, setApiState] = useState("checking");
   const [apiError, setApiError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const [busy, setBusy] = useState(false);
+  const [historyDays, setHistoryDays] = useState(DEFAULT_HISTORY_DAYS);
+
+  const [adfRuns, setAdfRuns] = useState([]);
+  const [adfLoading, setAdfLoading] = useState(false);
+  const [adfError, setAdfError] = useState("");
+
   const [overview, setOverview] = useState(null);
-  const [pipelineMetrics, setPipelineMetrics] = useState(null);
   const [trustMetrics, setTrustMetrics] = useState(null);
   const [costMetrics, setCostMetrics] = useState(null);
-  const [pipelineRows, setPipelineRows] = useState(null);
   const [tableList, setTableList] = useState([]);
+
   const [requests, setRequests] = useState([]);
-  const [requestForm, setRequestForm] = useState({ dataset: "", reason: "", priority: "Medium" });
-  const [messages, setMessages] = useState([{ role: "assistant", text: "Hello! Ask me about pipeline failures, dataset trust, platform costs, or data requests." }]);
+  const [requestForm, setRequestForm] = useState(EMPTY_REQUEST_FORM);
+
+  const [messages, setMessages] = useState(INITIAL_MESSAGES);
   const [chatText, setChatText] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  
 
-  const loadData = useCallback(async () => {
-    setBusy(true); setApiError("");
-    const results = await Promise.allSettled([
-      axios.get(`${API}/health`, { timeout: 4000 }),
-      axios.get(`${API}/metrics/overview`, { timeout: 6000 }),
-      axios.get(`${API}/metrics/pipelines`, { timeout: 6000 }),
-      axios.get(`${API}/metrics/trust`, { timeout: 6000 }),
-      axios.get(`${API}/metrics/cost`, { timeout: 6000 }),
-      axios.get(`${API}/tables`, { timeout: 6000 })
-    ]);
-    const [health, ov, pipe, trust, cost, tables] = results;
-    const connected = health.status === "fulfilled" && health.value.data?.connected;
-    setApiState(connected ? "connected" : "offline");
-    if (!connected) setApiError(health.status === "rejected" ? "Cannot reach Flask/Exasol. Demo values are shown where live values are unavailable." : "Exasol connection is not confirmed.");
-    if (ov.status === "fulfilled" && ov.value.data?.success) setOverview(ov.value.data);
-    if (pipe.status === "fulfilled" && pipe.value.data?.success) setPipelineMetrics(pipe.value.data.metrics);
-    if (trust.status === "fulfilled" && trust.value.data?.success) setTrustMetrics(trust.value.data.metrics);
-    if (cost.status === "fulfilled" && cost.value.data?.success) setCostMetrics(cost.value.data.metrics);
-    if (tables.status === "fulfilled" && tables.value.data?.success) setTableList(tables.value.data.tables || []);
-    const runs = tables.status === "fulfilled" ? (tables.value.data.tables || []).some(t => t.table_name?.toUpperCase() === "PIPELINE_RUNS") : false;
-    if (runs) {
-      try {
-        const r = await axios.get(`${API}/tables/HACKATHON/PIPELINE_RUNS?limit=100`, { timeout: 8000 });
-        setPipelineRows(r.data.data || []);
-      } catch { setPipelineRows(null); }
-    } else setPipelineRows(null);
-    setBusy(false);
+  const pipelineMetrics = useMemo(() => countRuns(adfRuns), [adfRuns]);
+  const pageTitle = NAV.find((item) => item.id === page)?.label || "Overview";
+
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("exasol-theme", theme);
+  }, [theme]);
+
+  const loadAdfRuns = useCallback(async () => {
+    setAdfLoading(true);
+    setAdfError("");
+
+    try {
+      const response = await getDeduplicated(`${API}/adf/debug-runs`, {
+        params: { days: historyDays },
+        timeout: 60000,
+      });
+
+      if (!response.data?.success) {
+        throw new Error(
+          response.data?.error || "Azure Data Factory did not return pipeline runs."
+        );
+      }
+
+      setAdfRuns(
+        Array.isArray(response.data.pipelines) ? response.data.pipelines : []
+      );
+    } catch (error) {
+      // Keep the last successful run list visible if a refresh fails.
+      setAdfError(
+        getErrorMessage(error, "Unable to retrieve Azure Data Factory runs.")
+      );
+    } finally {
+      setAdfLoading(false);
+    }
+  }, [historyDays]);
+
+  const loadPlatformData = useCallback(async () => {
+    setBusy(true);
+    setApiError("");
+
+    try {
+      const results = await Promise.allSettled([
+        getDeduplicated(`${API}/health`, { timeout: 6000 }),
+        getDeduplicated(`${API}/metrics/overview`, { timeout: 8000 }),
+        getDeduplicated(`${API}/trust/metrics`, { timeout: 8000 }),
+        getDeduplicated(`${API}/metrics/cost`, { timeout: 8000 }),
+        getDeduplicated(`${API}/tables`, { timeout: 8000 }),
+      ]);
+
+      const [healthResult, overviewResult, trustResult, costResult, tablesResult] =
+        results;
+
+      const connected =
+        healthResult.status === "fulfilled" &&
+        Boolean(healthResult.value.data?.connected);
+
+      setApiState(connected ? "connected" : "offline");
+
+      if (!connected) {
+        setApiError(
+          healthResult.status === "rejected"
+            ? getErrorMessage(
+              healthResult.reason,
+              "Cannot reach Flask or confirm the Exasol connection."
+            )
+            : "The Flask health endpoint did not confirm an Exasol connection."
+        );
+      }
+
+      if (
+        overviewResult.status === "fulfilled" &&
+        overviewResult.value.data?.success
+      ) {
+        setOverview(overviewResult.value.data);
+      }
+      // Retain the last successful values when an individual endpoint temporarily fails.
+
+      // Accept either direct trust JSON or a wrapped Flask response.
+      if (trustResult.status === "fulfilled") {
+        const payload = trustResult.value.data;
+
+        const trustData =
+          payload?.metrics ??
+          payload?.trust_metrics ??
+          payload?.data?.metrics ??
+          payload?.data ??
+          payload;
+
+        if (trustData && typeof trustData === "object") {
+          console.log("Trust API response:", payload);
+          console.log("Trust metrics passed to component:", trustData);
+
+          setTrustMetrics(trustData);
+        }
+      } else {
+        console.error(
+          "Trust API request failed:",
+          getErrorMessage(
+            trustResult.reason,
+            "Unable to load trust metrics."
+          )
+        );
+      }
+      if (
+        costResult.status === "fulfilled" &&
+        (costResult.value.data?.success !== false)
+      ) {
+        const costResponse = costResult.value.data || {};
+        // The current Flask API returns cost_data as an array of Azure billing rows.
+        // Derive only metrics supported by that response; do not invent usage units.
+        const costPayload =
+          costResponse.metrics ??
+          costResponse.data?.metrics ??
+          costResponse.data ??
+          null;
+
+        if (costPayload && !Array.isArray(costPayload)) {
+          setCostMetrics(costPayload);
+        } else if (Array.isArray(costResponse.cost_data)) {
+          const rows = costResponse.cost_data;
+          const totalCost = rows.reduce(
+            (sum, row) => sum + (Number(row?.PreTaxCost) || 0),
+            0
+          );
+          const currencies = [...new Set(
+            rows.map((row) => row?.Currency).filter(Boolean)
+          )];
+
+          setCostMetrics({
+            total_cost: totalCost,
+            total_usage: null,
+            cost_per_usage_unit: null,
+            currency: currencies.length === 1 ? currencies[0] : null,
+            record_count: rows.length,
+            cost_data: rows,
+            period: costResponse.period || null,
+            scope: costResponse.scope || null,
+          });
+        } else if (costResponse.success && (
+          costResponse.total_cost != null ||
+          costResponse.total_usage != null ||
+          costResponse.cost_per_usage_unit != null
+        )) {
+          setCostMetrics(costResponse);
+        }
+      }
+
+      if (
+        tablesResult.status === "fulfilled" &&
+        tablesResult.value.data?.success
+      ) {
+        setTableList(
+          Array.isArray(tablesResult.value.data.tables)
+            ? tablesResult.value.data.tables
+            : []
+        );
+      }
+    } catch (error) {
+      setApiState("offline");
+      setApiError(getErrorMessage(error, "Unable to load platform metrics."));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  const refreshAll = useCallback(async () => {
+    await Promise.all([loadPlatformData(), loadAdfRuns()]);
+  }, [loadPlatformData, loadAdfRuns]);
+
+
+  useEffect(() => {
+    loadPlatformData();
+  }, [loadPlatformData]);
+
+  useEffect(() => {
+    if (page === "database") {
+      console.info("ExasolDatabase page mounted");
+    }
+  }, [page]);
+
+  useEffect(() => {
+    loadAdfRuns();
+  }, [loadAdfRuns]);
+
+  // Load persisted requests if the backend exposes GET /api/requests.
+  useEffect(() => {
+    let active = true;
+    getDeduplicated(`${API}/requests`, { timeout: 8000 })
+      .then((response) => {
+        if (!active) return;
+        const payload = response.data;
+        const rows = Array.isArray(payload)
+          ? payload
+          : Array.isArray(payload?.requests)
+            ? payload.requests
+            : Array.isArray(payload?.data)
+              ? payload.data
+              : null;
+        if (rows) {
+          setRequests(rows.map((item, index) => ({
+            id: item.id ?? item.request_id ?? `REQ-${index + 1}`,
+            dataset: item.dataset ?? item.dataset_id ?? item.dataset_name ?? "—",
+            reason: item.reason ?? item.business_justification ?? "",
+            priority: item.priority ?? "Medium",
+            status: item.status ?? "Pending",
+          })));
+        }
+      })
+      .catch(() => {
+        // GET may not be implemented; keep the in-session list without disrupting the app.
+      });
+    return () => { active = false; };
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
-
-  const actualPipelines = useMemo(() => pipelineRows ? pipelineRows.map(row => ({
-    name: row.pipeline_name || row.run_id || "Unnamed pipeline",
-    source: row.source_system || "—", status: row.status || "UNKNOWN",
-    duration: row.duration_seconds,
-    time: row.start_time ? new Date(row.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—",
-    sla: row.sla_minutes != null && row.duration_seconds != null ? (Number(row.duration_seconds) > Number(row.sla_minutes) * 60 ? "Breached" : "On time") : "Unknown",
-    error: row.error_message
-  })) : DEMO.pipelines, [pipelineRows]);
-  const filteredPipelines = actualPipelines.filter(r => `${r.name} ${r.source} ${r.status}`.toLowerCase().includes(search.toLowerCase()));
-  const demoMode = apiState !== "connected";
-  const totalRuns = pipelineMetrics?.total_runs ?? DEMO.pipelines.length;
-  const successfulRuns = pipelineMetrics?.successful_runs ?? 3;
-  const failedRuns = pipelineMetrics?.failed_runs ?? 2;
-  const successRate = pipelineMetrics?.success_rate_pct ?? successfulRuns * 100 / Math.max(totalRuns, 1);
-  const trustScore = trustMetrics?.tables?.trust_scores?.avg_trust_score ?? 88;
-  const totalCost = costMetrics?.total_cost ?? 2930;
-  const totalUsage = costMetrics?.total_usage ?? 2550;
-  const trustRows = DEMO.trust;
-
-  const switchPage = (id) => { setPage(id); setMobileOpen(false); setSearch(""); setNotice(""); };
-  const pageTitle = NAV.find(n => n.id === page)?.label || "Overview";
+  function switchPage(nextPage) {
+    setPage(nextPage);
+    setMobileOpen(false);
+    setSearch("");
+    setNotice("");
+  }
 
   async function submitRequest(event) {
     event.preventDefault();
-    if (!requestForm.dataset.trim() || !requestForm.reason.trim()) return;
-    let record;
-    try {
-      const response = await axios.post(`${API}/requests`, {
-        requester: "demo.user", dataset_id: requestForm.dataset,
-        business_justification: requestForm.reason, priority: requestForm.priority
-      }, { timeout: 6000 });
-      record = { id: response.data.request_id || `REQ-${Date.now()}`, ...requestForm, status: "Pending" };
-      setNotice("Request submitted to the backend.");
-    } catch {
-      record = { id: `DEMO-${Date.now().toString().slice(-6)}`, ...requestForm, status: "Pending (Demo)" };
-      setNotice("Saved in this browser session only. The backend request API is unavailable.");
+
+    const dataset = requestForm.dataset.trim();
+    const reason = requestForm.reason.trim();
+
+    if (!dataset || !reason) {
+      setNotice("Enter both a dataset and a business justification.");
+      return;
     }
-    setRequests(old => [record, ...old]);
-    setRequestForm({ dataset: "", reason: "", priority: "Medium" });
-  }
 
-  
-const sendChat = async (e) => {
-  e.preventDefault();
-
-  const question = chatText.trim();
-
-  if (!question || busy) return;
-
-  setMessages((prev) => [
-    ...prev,
-    { role: "user", text: question }
-  ]);
-
-  setChatText("");
-  setBusy(true);
-
-  try {
-    const response = await fetch(
-      "http://127.0.0.1:5000/api/rag/query",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
+    try {
+      const response = await axios.post(
+        `${API}/requests`,
+        {
+          requester: "app.user",
+          dataset_id: dataset,
+          business_justification: reason,
+          priority: requestForm.priority,
         },
-        body: JSON.stringify({ question })
-      }
-    );
+        { timeout: 10000 }
+      );
 
-    const data = await response.json();
+      const record = {
+        id: response.data?.request_id || `REQ-${Date.now()}`,
+        dataset,
+        reason,
+        priority: requestForm.priority,
+        status: response.data?.status || "Pending",
+      };
 
-    if (!response.ok || !data.success) {
-      throw new Error(
-        typeof data.error === "string"
-          ? data.error
-          : data.error?.message || "RAG request failed."
+      setRequests((current) => [record, ...current]);
+      setNotice("Data request submitted successfully.");
+      setRequestForm(EMPTY_REQUEST_FORM);
+    } catch (error) {
+      setNotice(
+        `Request was not submitted: ${getErrorMessage(
+          error,
+          "The request API is unavailable."
+        )}`
       );
     }
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "assistant",
-        text: data.answer
-      }
-    ]);
-  } catch (error) {
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "assistant",
-        text: `Error: ${error.message}`
-      }
-    ]);
-  } finally {
-    setBusy(false);
   }
-};
+
+  async function sendChat(event) {
+    event.preventDefault();
+
+    const question = chatText.trim();
+    if (!question || chatBusy) return;
+
+    setMessages((current) => [...current, { role: "user", text: question }]);
+    setChatText("");
+    setChatBusy(true);
+
+    try {
+      const response = await axios.post(
+        `${API}/rag/query`,
+        { question },
+        { timeout: 30000 }
+      );
+
+      const answer =
+        response.data?.answer ||
+        response.data?.message ||
+        "The assistant returned an empty response.";
+
+      setMessages((current) => [
+        ...current,
+        { role: "assistant", text: answer },
+      ]);
+    } catch (error) {
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          text: `Unable to reach the chat API: ${getErrorMessage(
+            error,
+            "Check POST /api/rag/query and confirm Ollama and Exasol are available."
+          )}`,
+        },
+      ]);
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
+  const visibleRequests = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return requests;
+
+    return requests.filter((request) =>
+      `${request.id} ${request.dataset} ${request.reason} ${request.status}`
+        .toLowerCase()
+        .includes(query)
+    );
+  }, [requests, search]);
+
+  const trustScore =
+    trustMetrics?.trust_score ??
+    trustMetrics?.tables?.trust_scores?.avg_trust_score ??
+    null;
+
+  const totalCost = costMetrics?.total_cost ?? null;
+  const totalUsage = costMetrics?.total_usage ?? null;
+  const costPerUsageUnit = costMetrics?.cost_per_usage_unit ?? null;
+
+  const schema = overview?.schema || DEFAULT_SCHEMA;
+  const tableCount = overview?.table_count ?? tableList.length;
+
+  return (
+    <div className="app-shell">
+      <Sidebar
+        nav={NAV}
+        page={page}
+        switchPage={switchPage}
+        mobileOpen={mobileOpen}
+        failedRuns={pipelineMetrics.failed}
+        apiState={apiState}
+        schema={schema}
+        tableCount={tableCount}
+      />
+
+      <main className="main">
+        <Topbar
+          title={pageTitle}
+          search={search}
+          setSearch={setSearch}
+          onRefresh={refreshAll}
+          busy={busy || adfLoading}
+          onMenu={() => setMobileOpen((open) => !open)}
+          mobileOpen={mobileOpen}
+          onChat={() => switchPage("chat")}
+          theme={theme}
+          onToggleTheme={() => setTheme((current) => current === "light" ? "dark" : "light")}
+        />
+
+        <div className="content">
+          {apiError && (
+            <div className="notice">
+              <strong>Exasol connection:</strong> {apiError}
+            </div>
+          )}
+
+          {adfError && page !== "pipelines" && (
+            <div className="notice">
+              <strong>ADF pipeline data:</strong> {adfError}
+            </div>
+          )}
+
+          {notice && (
+            <div className="notice">
+              {notice}
+              <button
+                type="button"
+                className="notice-close"
+                aria-label="Dismiss notification"
+                onClick={() => setNotice("")}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          <div className="page-intro">
+            <div>
+              <h1>
+                {page === "overview" ? "DataOps at a glance" : pageTitle}
+              </h1>
+              <p>
+                {{
+                  overview:
+                    "Monitor live pipeline reliability and available platform metrics.",
+                  pipelines:
+                    "Inspect manual and triggered Azure Data Factory executions.",
+                  trust:
+                    "Review trust metrics and the live Exasol schema inventory.",
+                  cost:
+                    "Review cost and usage metrics returned by the backend.",
+                  chat:
+                    "Ask questions about pipeline runs and enterprise data.",
+                  requests:
+                    "Create and review data requests in this session.",
+                  database:
+                    "Browse schemas, inspect columns, and review Exasol records.",
+                }[page]}
+              </p>
+            </div>
+
+            <div className="actions">
+              <button
+                type="button"
+                className="btn"
+                onClick={refreshAll}
+                disabled={busy || adfLoading}
+              >
+                <RefreshCw
+                  size={14}
+                  className={busy || adfLoading ? "spin" : ""}
+                />
+                Refresh
+              </button>
+
+              {!["chat", "requests"].includes(page) && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => switchPage("chat")}
+                >
+                  <MessageSquare size={14} />
+                  Ask assistant
+                </button>
+              )}
+            </div>
+          </div>
+
+          {page === "overview" && (
+            <>
+              <div className="grid metrics-grid">
+                <Metric
+                  label="Pipeline success rate"
+                  value={formatPercent(pipelineMetrics.successRate)}
+                  hint={`${formatNumber(pipelineMetrics.successful)} successful runs`}
+                  icon={Activity}
+                  color="green"
+                />
+                <Metric
+                  label="Failed pipeline runs"
+                  value={formatNumber(pipelineMetrics.failed)}
+                  hint="From the selected ADF history window"
+                  icon={AlertTriangle}
+                  color="red"
+                />
+                <Metric
+                  label="Average trust score"
+                  value={formatPercent(trustScore)}
+                  hint="Live trust metric, when available"
+                  icon={ShieldCheck}
+                  color="blue"
+                />
+                <Metric
+                  label="Total recorded cost"
+                  value={totalCost == null ? "—" : formatNumber(totalCost)}
+                  hint={
+                    totalUsage == null
+                      ? "No live usage metric available"
+                      : `${formatNumber(totalUsage)} usage units`
+                  }
+                  icon={Wallet}
+                  color="orange"
+                />
+              </div>
+
+              <div className="content-grid">
+                <Card>
+                  <SectionTitle
+                    title="Pipeline reliability"
+                    subtitle={`Live ADF runs over the last ${historyDays} days`}
+                  />
+                  <div className="health-list">
+                    <div className="health-item">
+                      <Activity size={17} />
+                      <span>Total runs</span>
+                      <strong>{formatNumber(pipelineMetrics.total)}</strong>
+                    </div>
+                    <div className="health-item">
+                      <CheckCircle2 size={17} />
+                      <span>Succeeded</span>
+                      <strong>{formatNumber(pipelineMetrics.successful)}</strong>
+                    </div>
+                    <div className="health-item">
+                      <XCircle size={17} />
+                      <span>Failed</span>
+                      <strong>{formatNumber(pipelineMetrics.failed)}</strong>
+                    </div>
+                    <div className="health-item">
+                      <Clock3 size={17} />
+                      <span>Currently running</span>
+                      <strong>{formatNumber(pipelineMetrics.running)}</strong>
+                    </div>
+                  </div>
+                </Card>
+
+                <Card>
+                  <SectionTitle
+                    title="Platform connections"
+                    subtitle="Current API connection checks"
+                  />
+                  <div className="health-list">
+                    <div className="health-item">
+                      <Server size={17} />
+                      <span>Flask / Exasol</span>
+                      <Badge>
+                        {apiState === "connected"
+                          ? "Connected"
+                          : apiState === "checking"
+                            ? "Checking"
+                            : "Unavailable"}
+                      </Badge>
+                    </div>
+                    <div className="health-item">
+                      <Activity size={17} />
+                      <span>Azure Data Factory</span>
+                      <Badge>{adfError ? "Unavailable" : "Checked"}</Badge>
+                    </div>
+                    <div className="health-item">
+                      <ShieldCheck size={17} />
+                      <span>Trust metrics</span>
+                      <strong>{trustScore == null ? "—" : formatPercent(trustScore)}</strong>
+                    </div>
+                    <div className="health-item">
+                      <Zap size={17} />
+                      <span>Cost per usage unit</span>
+                      <strong>{formatNumber(costPerUsageUnit, 4)}</strong>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+
+              <Card className="table-card">
+                <SectionTitle
+                  title="Recent pipeline executions"
+                  subtitle="Latest real runs returned by Azure Data Factory"
+                  action={
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => switchPage("pipelines")}
+                    >
+                      View all →
+                    </button>
+                  }
+                />
+                <PipelineTable
+                  runs={adfRuns.slice(0, 5)}
+                  loading={adfLoading}
+                  error={adfError}
+                  onRefresh={loadAdfRuns}
+                />
+              </Card>
+            </>
+          )}
+
+          {page === "pipelines" && (
+            <>
+              <div className="pipeline-history-controls">
+                <div>
+                  <span className="live-indicator" />
+                  Azure Data Factory
+                  <span className="pipeline-window-label">
+                    Execution history
+                  </span>
+                </div>
+
+                <label>
+                  History
+                  <select
+                    value={historyDays}
+                    onChange={(event) =>
+                      setHistoryDays(Number(event.target.value))
+                    }
+                  >
+                    <option value={1}>Last 24 hours</option>
+                    <option value={7}>Last 7 days</option>
+                    <option value={30}>Last 30 days</option>
+                    <option value={90}>Last 90 days</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="grid metrics-grid">
+                <Metric
+                  label="Total runs"
+                  value={formatNumber(pipelineMetrics.total)}
+                  hint="Runs returned by Azure"
+                  icon={Activity}
+                />
+                <Metric
+                  label="Succeeded"
+                  value={formatNumber(pipelineMetrics.successful)}
+                  hint="Completed successfully"
+                  icon={CheckCircle2}
+                  color="green"
+                />
+                <Metric
+                  label="Failed"
+                  value={formatNumber(pipelineMetrics.failed)}
+                  hint="Requires investigation"
+                  icon={XCircle}
+                  color="red"
+                />
+                <Metric
+                  label="Success rate"
+                  value={formatPercent(pipelineMetrics.successRate)}
+                  hint="Succeeded divided by total runs"
+                  icon={Clock3}
+                  color="blue"
+                />
+              </div>
+
+              <div className="pipeline-status-strip">
+                <div>
+                  <span>Currently running</span>
+                  <strong>{formatNumber(pipelineMetrics.running)}</strong>
+                </div>
+                <div>
+                  <span>Manual executions</span>
+                  <strong>{formatNumber(countTriggerType(adfRuns, "Manual"))}</strong>
+                </div>
+                <div>
+                  <span>Scheduled executions</span>
+                  <strong>{formatNumber(countTriggerType(adfRuns, "ScheduleTrigger"))}</strong>
+                </div>
+                <div>
+                  <span>History window</span>
+                  <strong>{historyDays} days</strong>
+                </div>
+              </div>
+
+              <PipelineTable
+                runs={adfRuns}
+                loading={adfLoading}
+                error={adfError}
+                onRefresh={loadAdfRuns}
+              />
+            </>
+          )}
 
 
-  return <div className="app-shell">
-    <Sidebar nav={NAV} page={page} switchPage={switchPage} mobileOpen={mobileOpen} failedRuns={failedRuns} apiState={apiState} schema={overview?.schema || "HACKATHON"} tableCount={overview?.table_count ?? tableList.length} />
-    <main className="main">
-      <Topbar title={pageTitle} search={search} setSearch={setSearch} onRefresh={loadData} busy={busy} onMenu={() => setMobileOpen(v => !v)} mobileOpen={mobileOpen} onChat={() => switchPage("chat")} />
-      <div className="content">
-        {demoMode && <div className="notice"><strong>DEMO / CONNECTION NOTICE</strong> — {apiError || "Live database metrics have not been verified."} Illustrative values are not retrieved from Exasol.</div>}
-        {notice && <div className="notice">{notice}<button className="notice-close" onClick={() => setNotice("")}><X size={14}/></button></div>}
-        <div className="page-intro">
-          <div><h1>{page === "overview" ? "DataOps at a glance" : pageTitle}</h1><p>{({
-            overview: "Monitor reliability, data trust and platform efficiency from one place.",
-            pipelines: "Identify failed jobs, delayed runs and SLA breaches.",
-            trust: "Understand data freshness, validation and KPI reliability.",
-            cost: "Compare platform expenditure with measurable usage.",
-            chat: "Ask questions and discover trusted enterprise data.",
-            requests: "Create and track business data requests.",
-            database: "Browse schemas, inspect table columns, and review live records stored in Exasol."
-          })[page]}</p></div>
-          <div className="actions"><button className="btn" onClick={loadData}><RefreshCw size={13} className={busy ? "spin" : ""}/> Refresh</button>{page !== "chat" && page !== "requests" && <button className="btn btn-primary" onClick={() => switchPage("chat")}><MessageSquare size={14}/> Ask assistant</button>}</div>
+          {page === "trust" && (
+            <>
+              <TrustCard metrics={trustMetrics || {}} />
+            </>
+          )}
+
+
+          {page === "cost" && <UsageBillingDashboard />}
+
+          {page === "database" && (
+            <ExasolDatabase
+              api={API}
+              schemaDefault="HACKATHON"
+            />
+          )}
+
+          {page === "chat" && (
+            <ChatPage
+              messages={messages}
+              chatText={chatText}
+              setChatText={setChatText}
+              sendChat={sendChat}
+              busy={chatBusy}
+            />
+          )}
+
+          {page === "requests" && (
+            <RequestsPage
+              requests={visibleRequests}
+              form={requestForm}
+              setForm={setRequestForm}
+              onSubmit={submitRequest}
+              search={search}
+            />
+          )}
+
+          <footer
+            style={{
+              marginTop: 26,
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+              color: "#9aa4b3",
+              fontSize: 10,
+            }}
+          >
+            <span>Exasol DataOps Intelligence · Local development</span>
+            <span>
+              {busy || adfLoading
+                ? "Refreshing data…"
+                : `Last checked: ${new Date().toLocaleTimeString()}`}
+            </span>
+          </footer>
         </div>
-
-        {page === "overview" && <>
-          <div className="grid metrics-grid">
-            <Metric label="Pipeline success rate" value={pct(successRate)} hint={`${num(successfulRuns)} successful runs`} icon={Activity} color="green" trend={2.4}/>
-            <Metric label="Failed pipeline runs" value={num(failedRuns)} hint="Check recent incidents" icon={AlertTriangle} color="red"/>
-            <Metric label="Average trust score" value={pct(trustScore)} hint="Dataset trust indicators" icon={ShieldCheck} color="blue"/>
-            <Metric label="Total recorded cost" value={costMetrics?.total_cost != null ? num(totalCost) : `₹${num(totalCost)}`} hint={costMetrics?.total_usage != null ? `${num(totalUsage)} usage units` : "Illustrative demo cost"} icon={Wallet} color="orange"/>
-          </div>
-          <div className="content-grid">
-            <Card><SectionTitle title="Pipeline execution trend" subtitle="Illustrative daily success and failure percentage"/><div className="chart-wrap"><CostChart data={DEMO.trend} mode="trend"/></div><div className="legend"><span>● Success rate</span><span>● Failure rate</span></div></Card>
-            <Card><SectionTitle title="Platform health" subtitle="Current system indicators"/><div className="health-list">
-              <div className="health-item"><Server size={17}/><span>Exasol connection</span><Badge>{apiState === "connected" ? "SUCCESS" : "UNKNOWN"}</Badge></div>
-              <div className="health-item"><Activity size={17}/><span>Pipeline reliability</span><strong>{pct(successRate)}</strong></div>
-              <div className="health-item"><ShieldCheck size={17}/><span>Data trust</span><strong>{pct(trustScore)}</strong></div>
-              <div className="health-item"><Wallet size={17}/><span>Cost monitoring</span><Badge>{costMetrics?.total_cost != null ? "SUCCESS" : "DEMO"}</Badge></div>
-            </div></Card>
-          </div>
-          <Card className="table-card"><SectionTitle title="Recent pipeline runs" subtitle="Search and review execution status" action={<button className="btn" onClick={() => switchPage("pipelines")}>View all →</button>}/><PipelineTable rows={filteredPipelines.slice(0,5)}/></Card>
-          <div className="bottom-grid"><TrustCard rows={trustRows}/><CostChart data={DEMO.costs}/></div>
-        </>}
-        {page === "pipelines" && <>
-          <div className="grid metrics-grid"><Metric label="Total runs" value={num(totalRuns)} hint="Retrieved run records" icon={Activity}/><Metric label="Successful" value={num(successfulRuns)} hint="Completed successfully" icon={CheckCircle2} color="green"/><Metric label="Failed" value={num(failedRuns)} hint="Requires investigation" icon={XCircle} color="red"/><Metric label="Success rate" value={pct(successRate)} hint="Based on available statuses" icon={Clock3} color="blue"/></div>
-          <Card className="table-card"><SectionTitle title="Pipeline execution records" subtitle="Live records when available; otherwise illustrative demo records."/><PipelineTable rows={filteredPipelines}/></Card>
-        </>}
-        {page === "trust" && <>
-          <div className="grid metrics-grid"><Metric label="Average trust score" value={pct(trustScore)} hint="Stored score average" icon={ShieldCheck}/><Metric label="Datasets discovered" value={num(tableList.length)} hint="Tables returned by API" icon={Database} color="blue"/><Metric label="Quality checks" value={num(trustMetrics?.tables?.quality_results?.total_checks)} hint="Recorded validation results" icon={CheckCircle2} color="orange"/><Metric label="Trust data source" value={trustMetrics ? "Available" : "Demo"} hint="Based on API response" icon={Server} color="red"/></div>
-          <TrustCard rows={trustRows}/>
-          <Card className="table-card"><SectionTitle title="Exasol schema inventory" subtitle="Tables discovered by the configured schema"/><div className="table-scroll"><table><thead><tr><th>Table</th><th>Schema</th><th>Purpose</th></tr></thead><tbody>{tableList.map((t,i)=><tr key={t.table_name || i}><td><strong>{t.table_name}</strong></td><td>{t.table_schema || overview?.schema || "—"}</td><td>Exasol table</td></tr>)}</tbody></table></div></Card>
-        </>}
-        {page === "cost" && <>
-          <div className="grid metrics-grid"><Metric label="Total recorded cost" value={costMetrics?.total_cost != null ? num(totalCost) : `₹${num(totalCost)}`} hint="Confirm source currency" icon={Wallet} color="orange"/><Metric label="Total usage" value={num(totalUsage)} hint="Recorded usage units" icon={Zap} color="blue"/><Metric label="Cost per usage unit" value={costMetrics?.cost_per_usage_unit != null ? num(costMetrics.cost_per_usage_unit) : "—"} hint="Requires consistent units" icon={Activity}/><Metric label="Cost records" value={num(costMetrics?.record_count)} hint="Stored observations" icon={Database} color="red"/></div>
-          <CostChart data={DEMO.costs}/><div className="notice">The chart uses illustrative data unless period-level live records are available. Verify currency and usage units before making cost decisions.</div>
-        </>}
-        {page === "database" && <ExasolDatabase api={API} schemaDefault={overview?.schema || "HACKATHON"}/>}
-        {page === "chat" &&<ChatPage
-  messages={messages}
-  chatText={chatText}
-  setChatText={setChatText}
-  sendChat={sendChat}
-  busy={busy}
-/>}
-{page === "requests" && <RequestsPage requests={requests} form={requestForm} setForm={setRequestForm} onSubmit={submitRequest} search={search}/>}
-      </div>
-    </main>
-  </div>;
+      </main>
+    </div>
+  );
 }

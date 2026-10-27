@@ -1,3 +1,4 @@
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import {
@@ -12,31 +13,53 @@ import {
   Line,
 } from "recharts";
 
-const API = "http://127.0.0.1:5000/api";
+const API = "/api";
 
-function money(value) {
-  if (value == null || value === "" || !Number.isFinite(Number(value))) {
-    return "—";
+function toNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
   }
 
-  return `₹${Number(value).toLocaleString("en-IN", {
-    maximumFractionDigits: 2,
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function money(value) {
+  const number = toNumber(value);
+
+  if (number === null) return "Unavailable";
+
+  return `₹${number.toLocaleString("en-IN", {
     minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   })}`;
 }
 
 function formatNumber(value) {
-  if (value == null || !Number.isFinite(Number(value))) {
-    return "—";
+  const number = toNumber(value);
+
+  if (number === null) return "Unavailable";
+
+  return number.toLocaleString("en-IN");
+}
+
+function formatDate(value) {
+  if (typeof value !== "string" || value.length < 10) {
+    return "Unknown";
   }
 
-  return Number(value).toLocaleString("en-IN");
+  return value.slice(0, 10);
+}
+
+function formatChartDate(value) {
+  const date = formatDate(value);
+  return date === "Unknown" ? date : date.slice(5);
 }
 
 function Status({ value }) {
   const label =
     typeof value === "string" && value.trim()
-      ? value.toLowerCase()
+      ? value.trim().toLowerCase().replace(/\s+/g, "-")
       : "unknown";
 
   return (
@@ -46,35 +69,17 @@ function Status({ value }) {
   );
 }
 
-function formatDate(date) {
-  if (typeof date !== "string" || date.length < 10) {
-    return "Unknown";
-  }
-
-  return date;
-}
-
-function formatChartDate(date) {
-  if (typeof date !== "string" || date.length < 10) {
-    return "Unknown";
-  }
-
-  return date.slice(5);
-}
-
 export default function UsageBillingDashboard() {
   const [days, setDays] = useState(30);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // Prevent overlapping requests from this component.
-  const requestInFlight = useRef(false);
+  const requestId = useRef(0);
 
   const loadData = useCallback(async () => {
-    if (requestInFlight.current) return;
+    const currentRequestId = ++requestId.current;
 
-    requestInFlight.current = true;
     setLoading(true);
     setError("");
 
@@ -87,6 +92,8 @@ export default function UsageBillingDashboard() {
         }
       );
 
+      if (currentRequestId !== requestId.current) return;
+
       const result = response.data;
 
       if (!result || typeof result !== "object") {
@@ -97,30 +104,30 @@ export default function UsageBillingDashboard() {
 
       if (result.errors && Object.keys(result.errors).length > 0) {
         const messages = Object.entries(result.errors)
-          .map(([source, message]) => `${source}: ${message}`)
+          .map(([source, message]) => {
+            const detail =
+              typeof message === "string"
+                ? message
+                : JSON.stringify(message);
+
+            return `${source}: ${detail}`;
+          })
           .join(" | ");
 
         setError(messages);
       } else if (result.success === false) {
-        setError(
-          result.error || "Unable to retrieve usage and billing data."
-        );
+        setError(result.error || "Unable to retrieve dashboard data.");
       }
     } catch (err) {
+      if (currentRequestId !== requestId.current) return;
+
       const status = err.response?.status;
 
       if (status === 429) {
-        setError(
-          "Too many requests. Wait briefly before refreshing."
-        );
+        setError("Too many requests. Wait briefly before refreshing.");
       } else if (status === 404) {
         setError(
-          "Usage and billing endpoint not found. Check the Flask route."
-        );
-      } else if (status >= 500) {
-        setError(
-          err.response?.data?.error ||
-            "The backend encountered an error."
+          "The usage-billing API route was not found. Check your Flask route and frontend proxy."
         );
       } else {
         setError(
@@ -130,49 +137,62 @@ export default function UsageBillingDashboard() {
         );
       }
     } finally {
-      requestInFlight.current = false;
-      setLoading(false);
+      if (currentRequestId === requestId.current) {
+        setLoading(false);
+      }
     }
   }, [days]);
 
-  // One initial fetch per effect execution. No duplicate effect.
   useEffect(() => {
     loadData();
+
+    return () => {
+      requestId.current += 1;
+    };
   }, [loadData]);
 
   const daily = Array.isArray(data?.daily) ? data.daily : [];
   const summary = data?.summary || {};
   const period = data?.period || {};
 
-  const chartData = daily.map((row) => ({
-    ...row,
-    chartDate: formatChartDate(row.date),
-    cost_inr:
-      row.cost_inr == null ? null : Number(row.cost_inr),
-    pipeline_runs:
-      row.pipeline_runs == null ? null : Number(row.pipeline_runs),
-  }));
+  const chartData = daily
+    .map((row) => ({
+      ...row,
+      chartDate: formatChartDate(row.date),
+      cost_inr: toNumber(row.cost_inr),
+      pipeline_runs: toNumber(row.pipeline_runs),
+    }))
+    .sort((a, b) => {
+      const dateA = String(a.date || "");
+      const dateB = String(b.date || "");
+      return dateA.localeCompare(dateB);
+    });
 
   const assessmentRows = daily
     .filter(
       (row) =>
-        row.cost_level === "heavy" ||
-        row.usage_level === "heavy" ||
-        row.cost_level === "unknown" ||
-        row.usage_level === "unknown" ||
-        Number(row.failed || 0) > 0
+        ["heavy", "unknown"].includes(
+          String(row.cost_level || "").toLowerCase()
+        ) ||
+        ["heavy", "unknown"].includes(
+          String(row.usage_level || "").toLowerCase()
+        ) ||
+        (toNumber(row.failed) || 0) > 0
     )
     .slice()
     .reverse();
 
-  const hasAssessment = daily.some(
-    (row) =>
-      row.cost_level === "heavy" ||
-      row.usage_level === "heavy" ||
-      row.cost_level === "unknown" ||
-      row.usage_level === "unknown" ||
-      Number(row.failed || 0) > 0
+  const hasAssessment = assessmentRows.length > 0;
+
+  const hasCostData = chartData.some(
+    (row) => row.cost_inr !== null
   );
+
+  const hasPipelineData = chartData.some(
+    (row) => row.pipeline_runs !== null
+  );
+
+  const hasChartData = hasCostData || hasPipelineData;
 
   return (
     <section className="usage-dashboard">
@@ -221,7 +241,11 @@ export default function UsageBillingDashboard() {
               <span>Recorded cost</span>
               <strong>{money(summary.recorded_cost_inr)}</strong>
               <small>
-                {period.days_with_cost_records ?? 0} days with cost records
+                {period.days_with_cost_records == null
+                  ? "Unavailable"
+                  : period.days_with_cost_records === 0
+                    ? "No cost records returned"
+                    : `${period.days_with_cost_records} days with cost records`}
               </small>
             </article>
 
@@ -262,80 +286,110 @@ export default function UsageBillingDashboard() {
             </div>
 
             <div className="usage-chart">
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart
-                  data={chartData}
-                  margin={{
-                    top: 12,
-                    right: 16,
-                    left: 8,
-                    bottom: 8,
-                  }}
+              {hasChartData ? (
+                <ResponsiveContainer
+                  width="100%"
+                  height="100%"
+                  minWidth={0}
                 >
-                  <CartesianGrid strokeDasharray="3 3" />
-
-                  <XAxis
-                    dataKey="chartDate"
-                    minTickGap={24}
-                  />
-
-                  <YAxis
-                    yAxisId="cost"
-                    tickFormatter={(value) => `₹${value}`}
-                  />
-
-                  <YAxis
-                    yAxisId="runs"
-                    orientation="right"
-                    allowDecimals={false}
-                  />
-
-                  <Tooltip
-                    labelFormatter={(label) => `Date: ${label}`}
-                    formatter={(value, name) => {
-                      if (value == null) {
-                        return ["Unavailable", name];
-                      }
-
-                      if (name === "Cost (INR)") {
-                        return [money(value), name];
-                      }
-
-                      return [formatNumber(value), name];
+                  <ComposedChart
+                    data={chartData}
+                    margin={{
+                      top: 12,
+                      right: 20,
+                      left: 12,
+                      bottom: 8,
                     }}
-                  />
+                  >
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="#e2e8f0"
+                    />
 
-                  <Legend />
+                    <XAxis
+                      dataKey="chartDate"
+                      minTickGap={24}
+                      tick={{ fontSize: 12 }}
+                    />
 
-                  <Bar
-                    yAxisId="cost"
-                    dataKey="cost_inr"
-                    name="Cost (INR)"
-                    fill="#6478f5"
-                    radius={[4, 4, 0, 0]}
-                  />
+                    <YAxis
+                      yAxisId="cost"
+                      tickFormatter={(value) => `₹${value}`}
+                      tick={{ fontSize: 12 }}
+                      width={75}
+                    />
 
-                  <Line
-                    yAxisId="runs"
-                    type="monotone"
-                    dataKey="pipeline_runs"
-                    name="Pipeline runs"
-                    stroke="#16a085"
-                    strokeWidth={2}
-                    connectNulls={false}
-                    dot={false}
-                  />
-                </ComposedChart>
-              </ResponsiveContainer>
+                    <YAxis
+                      yAxisId="runs"
+                      orientation="right"
+                      allowDecimals={false}
+                      tick={{ fontSize: 12 }}
+                      width={45}
+                    />
+
+                    <Tooltip
+                      labelFormatter={(label) => `Date: ${label}`}
+                      formatter={(value, name) => {
+                        if (value == null) {
+                          return ["Unavailable", name];
+                        }
+
+                        return [
+                          name === "Cost (INR)"
+                            ? money(value)
+                            : formatNumber(value),
+                          name,
+                        ];
+                      }}
+                    />
+
+                    <Legend />
+
+                    <Bar
+                      yAxisId="cost"
+                      dataKey="cost_inr"
+                      name="Cost (INR)"
+                      fill="#6478f5"
+                      radius={[4, 4, 0, 0]}
+                      maxBarSize={32}
+                      isAnimationActive={false}
+                    />
+
+                    <Line
+                      yAxisId="runs"
+                      type="monotone"
+                      dataKey="pipeline_runs"
+                      name="Pipeline runs"
+                      stroke="#16a085"
+                      strokeWidth={3}
+                      connectNulls
+                      dot={{ r: 3 }}
+                      activeDot={{ r: 5 }}
+                      isAnimationActive={false}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="usage-chart-empty">
+                  {daily.length === 0
+                    ? "No daily records were returned by the API."
+                    : "Daily records exist, but cost_inr and pipeline_runs contain no valid numeric values."}
+                </div>
+              )}
             </div>
+
+            {daily.length > 0 && !hasChartData && (
+              <p className="usage-footnote">
+                Check the API response field names and values for each daily
+                record.
+              </p>
+            )}
           </article>
 
           <article className="usage-panel">
             <div className="usage-panel-heading">
               <h3>Daily usage assessment</h3>
-              <p>
-                Thresholds are configured by the Flask backend.
-              </p>
+              <p>Thresholds are configured by the Flask backend.</p>
             </div>
 
             <div className="usage-table-wrap">
@@ -360,9 +414,7 @@ export default function UsageBillingDashboard() {
                       .slice()
                       .reverse()
                       .map((row, index) => (
-                        <tr
-                          key={row.date || `row-${index}`}
-                        >
+                        <tr key={row.date || `row-${index}`}>
                           <td>{formatDate(row.date)}</td>
                           <td>{money(row.cost_inr)}</td>
                           <td>
@@ -413,10 +465,10 @@ export default function UsageBillingDashboard() {
                   >
                     <strong>{formatDate(row.date)}</strong>
 
-                    <div>
+                    <div className="usage-reason-statuses">
                       <Status value={row.cost_level} />
                       <Status value={row.usage_level} />
-                      {Number(row.failed || 0) > 0 && (
+                      {(toNumber(row.failed) || 0) > 0 && (
                         <Status value="failed" />
                       )}
                     </div>
@@ -426,7 +478,7 @@ export default function UsageBillingDashboard() {
                         "Review the billing and pipeline records for this date."}
                     </p>
 
-                    {Number(row.failed || 0) > 0 && (
+                    {(toNumber(row.failed) || 0) > 0 && (
                       <p>
                         {formatNumber(row.failed)} pipeline run(s) failed.
                         Inspect the corresponding Azure Data Factory run
@@ -434,13 +486,8 @@ export default function UsageBillingDashboard() {
                       </p>
                     )}
 
-                    {row.cost_reason && (
-                      <p>{row.cost_reason}</p>
-                    )}
-
-                    {row.usage_reason && (
-                      <p>{row.usage_reason}</p>
-                    )}
+                    {row.cost_reason && <p>{row.cost_reason}</p>}
+                    {row.usage_reason && <p>{row.usage_reason}</p>}
                   </div>
                 ))
               ) : (
