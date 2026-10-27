@@ -110,10 +110,13 @@ from azure.identity import ClientSecretCredential
 
 
 # Use the environment variables already configured for OpsNexus.
-SUBSCRIPTION_ID = os.environ["AZURE_SUBSCRIPTION_ID"]
-TENANT_ID = os.environ["AZURE_TENANT_ID"]
-CLIENT_ID = os.environ["AZURE_CLIENT_ID"]
-CLIENT_SECRET = os.environ["AZURE_CLIENT_SECRET"]
+# Azure configuration is optional at Flask startup. Exasol/RAG endpoints can
+# still run when Azure variables are not configured; Azure endpoints validate
+# these values when called and return a useful API error instead of crashing.
+SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID", "").strip()
+TENANT_ID = os.getenv("AZURE_TENANT_ID", "").strip()
+CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "").strip()
+CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 
 RESOURCE_GROUP = os.getenv("AZURE_RESOURCE_GROUP", "opsnexus")
 DATA_FACTORY = os.getenv("AZURE_DATA_FACTORY", "opsnexus")
@@ -344,6 +347,20 @@ def fetch_daily_cost(access_token, start_date, end_date):
 # ============================================================
 
 def get_azure_token():
+    missing = [
+        name for name, value in (
+            ("AZURE_TENANT_ID", TENANT_ID),
+            ("AZURE_CLIENT_ID", CLIENT_ID),
+            ("AZURE_CLIENT_SECRET", CLIENT_SECRET),
+            ("AZURE_SUBSCRIPTION_ID", SUBSCRIPTION_ID),
+        ) if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Azure is not configured. Add these variables to backend/.env: "
+            + ", ".join(missing)
+        )
+
     credential = ClientSecretCredential(
         tenant_id=TENANT_ID,
         client_id=CLIENT_ID,
@@ -2941,174 +2958,254 @@ def ollama_chat_api():
             "success": False,
             "error": str(exc),
         }), 502
+# ---------------------------------------------------------------------------
+# RAG SQL generation and execution (Exasol-safe)
+# ---------------------------------------------------------------------------
+
+EXASOL_RAG_SQL_RULES = """
+You generate SQL exclusively for Exasol.
+- Only one read-only SELECT statement is allowed.
+- Use only exact table and column names supplied in the live schema.
+- Fully qualify table names with the configured schema.
+- Never use MySQL DATE_SUB/DATE_ADD INTERVAL syntax.
+- For date arithmetic use ADD_DAYS(CURRENT_DATE, -N).
+- Do not add LIMIT to aggregate queries such as COUNT, SUM, AVG, MIN, MAX.
+- For non-aggregate result sets, LIMIT 100 unless a smaller limit is requested.
+- Do not use SQL comments, semicolons, DDL, DML, procedures, or system tables.
+- Return SQL only, with no Markdown fences or explanation.
+"""
+
+def _ollama_request(messages, timeout=None):
+    """Call Ollama with consistent timeout/error handling."""
+    url = f"{OLLAMA_BASE_URL}/api/chat"
+    try:
+        response = requests.post(
+            url,
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": messages,
+                "stream": False,
+                "options": {"temperature": 0},
+            },
+            timeout=timeout or OLLAMA_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        data = response.json()
+        answer = (data.get("message") or {}).get("content", "")
+        if not isinstance(answer, str) or not answer.strip():
+            raise RuntimeError("Ollama returned an empty response.")
+        return answer.strip()
+    except requests.exceptions.ConnectionError as exc:
+        raise RuntimeError(
+            f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. Start Ollama and "
+            f"confirm model '{OLLAMA_MODEL}' is installed."
+        ) from exc
+    except requests.exceptions.Timeout as exc:
+        raise RuntimeError(
+            f"Ollama timed out after {timeout or OLLAMA_TIMEOUT_SECONDS} seconds."
+        ) from exc
+    except requests.exceptions.HTTPError as exc:
+        detail = response.text[:1000] if "response" in locals() else str(exc)
+        raise RuntimeError(f"Ollama HTTP error: {detail}") from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"Invalid response from Ollama: {exc}") from exc
+
+
+def _clean_generated_sql(raw_sql):
+    sql = (raw_sql or "").strip()
+    sql = re.sub(r"^\s*```(?:sql)?\s*", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\s*```\s*$", "", sql).strip()
+    # A single trailing terminator is harmless; all internal semicolons are rejected.
+    if sql.endswith(";"):
+        sql = sql[:-1].rstrip()
+    return sql
+
+
+def _is_aggregate_sql(sql):
+    return bool(re.search(
+        r"\b(COUNT|SUM|AVG|MIN|MAX|MEDIAN|STDDEV|VARIANCE)\s*\(",
+        sql, re.IGNORECASE
+    ))
+
+
+def _validate_rag_sql(sql, allowed_tables, allowed_columns):
+    """Basic allow-list validation before SQL reaches Exasol."""
+    sql = _clean_generated_sql(sql)
+    if not sql or not re.match(r"^(SELECT|WITH)\b", sql, re.IGNORECASE):
+        raise ValueError("Only a single read-only SELECT query is permitted.")
+    if any(token in sql for token in (";", "--", "/*", "*/", "\\x00")):
+        raise ValueError("Multiple statements or SQL comments are not permitted.")
+
+    forbidden = re.compile(
+        r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|GRANT|"
+        r"REVOKE|CALL|EXECUTE|IMPORT|EXPORT|COMMIT|ROLLBACK|OPEN SCHEMA|"
+        r"CLOSE SCHEMA|USE)\b", re.IGNORECASE
+    )
+    if forbidden.search(sql):
+        raise ValueError("Unsafe SQL operation rejected.")
+
+    # Avoid the specific MySQL syntax that caused the reported failure.
+    if re.search(
+        r"\bDATE_SUB\s*\(|\bDATE_ADD\s*\([^)]*\bINTERVAL\b|"
+        r"\bINTERVAL\s+\d+\s+(DAY|DAYS|WEEK|WEEKS|MONTH|MONTHS)\b",
+        sql, re.IGNORECASE
+    ):
+        raise ValueError(
+            "MySQL date syntax is not supported by Exasol. Use ADD_DAYS(CURRENT_DATE, -N)."
+        )
+
+    # Check every FROM/JOIN table reference against the live schema.
+    table_pattern = re.compile(
+        r'\b(?:FROM|JOIN)\s+'
+        r'(?:(?:"?([A-Za-z_][\w$]*)"?)[.])?'
+        r'"?([A-Za-z_][\w$]*)"?',
+        re.IGNORECASE
+    )
+    matches = list(table_pattern.finditer(sql))
+    if not matches:
+        raise ValueError("No approved table reference was found in the SQL.")
+    for match in matches:
+        schema_name, table_name = match.groups()
+        if schema_name and schema_name.upper() != EXASOL_SCHEMA:
+            raise ValueError(
+                f"Access to schema '{schema_name}' is forbidden. "
+                f"Allowed schema: {EXASOL_SCHEMA}."
+            )
+        table_name = table_name.upper()
+        if table_name not in allowed_tables:
+            raise ValueError(
+                f"Table '{table_name}' is not available in schema '{EXASOL_SCHEMA}'."
+            )
+
+    # Exasol supports LIMIT. Avoid LIMIT on COUNT/SUM/etc. because it adds no value
+    # and some models generate awkward aggregate SQL.
+    if not _is_aggregate_sql(sql) and not re.search(r"\bLIMIT\s+\d+\b", sql, re.I):
+        sql += " LIMIT 100"
+    return sql
+
+
+def _schema_for_rag(connection):
+    """Build live table/column metadata once per request."""
+    schema_parts = []
+    allowed_tables = set()
+    allowed_columns = {}
+    for item in metadata_tables(connection, EXASOL_SCHEMA):
+        table = str(item.get("table_name") or "").upper()
+        if not table or not IDENTIFIER_PATTERN.fullmatch(table):
+            continue
+        columns = metadata_columns(connection, EXASOL_SCHEMA, table)
+        column_names = sorted({
+            str(col.get("column_name") or "").upper()
+            for col in columns if col.get("column_name")
+        })
+        if not column_names:
+            continue
+        allowed_tables.add(table)
+        allowed_columns[table] = set(column_names)
+        schema_parts.append(f'{EXASOL_SCHEMA}.{table}: {", ".join(column_names)}')
+    return schema_parts, allowed_tables, allowed_columns
+
+
+def _try_structured_failed_run_count(connection, question):
+    """
+    Deterministic path for common failure-count questions.
+    This avoids LLM SQL dialect mistakes for the exact user-reported question.
+    Returns None when the question is outside this intent or schema doesn't match.
+    """
+    q = question.lower()
+    asks_failure_count = (
+        any(word in q for word in ("fail", "failed", "failure", "failures"))
+        and any(word in q for word in ("how many", "count", "number", "total", "last week", "past week", "previous week"))
+    )
+    if not asks_failure_count:
+        return None
+
+    table = "STG_PIPELINE_RUNS"
+    columns = {str(row.get("column_name") or "").upper()
+               for row in metadata_columns(connection, EXASOL_SCHEMA, table)}
+    if not {"STATUS", "ENDED_AT"}.issubset(columns):
+        return None
+
+    # "previous/last week" is interpreted as the most recent seven calendar days,
+    # including today. The date range is inclusive at the start and exclusive
+    # after today, avoiding timestamp edge cases.
+    sql = (
+        f'SELECT COUNT(*) AS FAILED_PIPELINE_COUNT '
+        f'FROM {EXASOL_SCHEMA}.{table} '
+        f"WHERE UPPER(STATUS) = 'FAILED' "
+        f'AND ENDED_AT >= ADD_DAYS(CURRENT_DATE, -7) '
+        f'AND ENDED_AT < ADD_DAYS(CURRENT_DATE, 1)'
+    )
+    rows = query_rows(connection, sql)
+    return sql, rows
+
+
 @app.route("/api/rag/sql-query", methods=["POST"], strict_slashes=False)
 @app.route("/api/rag/query", methods=["POST"], strict_slashes=False)
 def rag_query():
     connection = None
-
     try:
         payload = request.get_json(silent=True) or {}
-        question = payload.get("question", payload.get("query", ""))
-
+        question = payload.get("question", payload.get("query", payload.get("message", "")))
         if not isinstance(question, str) or not question.strip():
-            return jsonify({
-                "success": False,
-                "error": "Please provide a question."
-            }), 400
-
+            return jsonify({"success": False, "error": "Please provide a question."}), 400
         question = question.strip()
-
         if len(question) > 2000:
-            return jsonify({
-                "success": False,
-                "error": "Question must not exceed 2000 characters."
-            }), 400
+            return jsonify({"success": False, "error": "Question must not exceed 2000 characters."}), 400
 
-        # 1. Retrieve Exasol schema
         connection = get_connection()
-        tables = metadata_tables(connection, EXASOL_SCHEMA)
-
-        schema_parts = []
-        allowed_tables = set()
-
-        for item in tables:
-            table = item["table_name"].upper()
-            allowed_tables.add(table)
-
-            columns = metadata_columns(
-                connection, EXASOL_SCHEMA, table
-            )
-
-            column_names = [
-                col["column_name"].upper()
-                for col in columns
-            ]
-
-            schema_parts.append(
-                f"{EXASOL_SCHEMA}.{table}: "
-                f"{', '.join(column_names)}"
-            )
-
+        schema_parts, allowed_tables, allowed_columns = _schema_for_rag(connection)
         if not schema_parts:
             return jsonify({
                 "success": False,
-                "error": "No tables found in the configured schema."
+                "error": f"No tables with columns found in schema {EXASOL_SCHEMA}.",
             }), 404
 
-        # 2. Ask Ollama to generate SQL
-        sql_prompt = f"""
-Generate one read-only Exasol SELECT query.
+        # Reliable deterministic query for the most common pipeline failure question.
+        try:
+            direct_result = _try_structured_failed_run_count(connection, question)
+        except Exception:
+            app.logger.exception("Deterministic pipeline-failure query failed; falling back to Ollama")
+            direct_result = None
 
-Available schema:
-{chr(10).join(schema_parts)}
+        if direct_result is not None:
+            sql, rows = direct_result
+        else:
+            schema_text = "\n".join(schema_parts)
+            sql_prompt = f"""
+{EXASOL_RAG_SQL_RULES}
 
-User question:
+Configured schema: {EXASOL_SCHEMA}
+
+LIVE SCHEMA (only these tables and columns exist):
+{schema_text}
+
+USER QUESTION:
 {question}
 
-Rules:
-- Return SQL only, without Markdown.
-- Use only the supplied tables and columns.
-- Qualify tables with {EXASOL_SCHEMA}.
-- Do not generate write or administrative statements.
-- Generate a single SELECT query.
-- Do not use semicolons or SQL comments.
-- Include LIMIT 100.
+Return one SQL query only.
 """
+            raw_sql = _ollama_request([
+                {"role": "system", "content": EXASOL_RAG_SQL_RULES},
+                {"role": "user", "content": sql_prompt},
+            ])
+            sql = _validate_rag_sql(raw_sql, allowed_tables, allowed_columns)
 
-        response = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": sql_prompt
-                    }
-                ],
-                "stream": False,
-                "options": {"temperature": 0}
-            },
-            timeout=180
-        )
-        response.raise_for_status()
-        
-        sql = response.json()["message"]["content"].strip()
-
-        # Remove Markdown fences sometimes returned by Ollama.
-        sql = re.sub(r"^\s*```(?:sql)?\s*", "", sql, flags=re.I)
-        sql = re.sub(r"\s*```\s*$", "", sql).strip()
-
-        # Remove one trailing statement terminator, if present.
-        # Semicolons anywhere else remain prohibited.
-        if sql.endswith(";"):
-            sql = sql[:-1].rstrip()
-
-        if not re.match(r"^(SELECT|WITH)\b", sql, re.I):
-            raise ValueError("Only SELECT queries are permitted.")
-
-        if any(token in sql for token in (";", "--", "/*", "*/")):
-            raise ValueError("Multiple statements or SQL comments rejected.")
-
-
-        forbidden = re.compile(
-            r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|"
-            r"TRUNCATE|GRANT|REVOKE|CALL|EXECUTE|IMPORT|EXPORT)\b",
-            re.I
-        )
-
-        if forbidden.search(sql):
-            raise ValueError("Unsafe SQL operation rejected.")
-
-        table_pattern = re.compile(
-            r'\b(?:FROM|JOIN)\s+'
-            r'(?:(?:"?([A-Za-z_][\w$]*)"?)[.])?'
-            r'"?([A-Za-z_][\w$]*)"?',
-            re.I
-        )
-
-        matches = list(table_pattern.finditer(sql))
-
-        if not matches:
-            raise ValueError("No approved table found in query.")
-
-        for match in matches:
-            schema_name, table_name = match.groups()
-
-            # Allow unqualified tables or HACKATHON.TABLE_NAME.
-            if schema_name and schema_name.upper() != EXASOL_SCHEMA:
-                raise ValueError(
-                    f"Access to schema '{schema_name}' is forbidden. "
-                    f"Allowed schema: {EXASOL_SCHEMA}"
+            try:
+                rows = query_rows(connection, sql)
+            except Exception as first_error:
+                app.logger.warning(
+                    "Ollama SQL failed; requesting one Exasol-specific correction: %s",
+                    str(first_error)[:1200],
                 )
-
-            if table_name.upper() not in allowed_tables:
-                raise ValueError(
-                    f"Table '{table_name}' is not available "
-                    f"in schema '{EXASOL_SCHEMA}'."
-                )
-
-        if not re.search(r"\bLIMIT\s+\d+\b", sql, re.I):
-            sql += " LIMIT 100"
-
-        # 4. Execute query against Exasol.
-        # If Ollama invents a column or produces invalid SQL, send the exact
-        # Exasol error and the live schema back to Ollama for one correction.
-        try:
-            rows = query_rows(connection, sql)
-        except Exception as first_sql_error:
-            app.logger.warning(
-                "Ollama-generated SQL failed; requesting one schema-grounded correction: %s",
-                str(first_sql_error)[:1000],
-            )
-
-            correction_prompt = f"""
-Correct the failed Exasol SQL using only the exact live schema below.
-Return one read-only SELECT query only, without Markdown, comments, or semicolons.
-Do not invent table or column names. Qualify tables with {EXASOL_SCHEMA}.
-Include LIMIT 100.
+                correction_prompt = f"""
+Repair the SQL for Exasol. Return SQL only.
+Use ADD_DAYS(CURRENT_DATE, -N) for date arithmetic. Never use DATE_SUB,
+DATE_ADD with INTERVAL, or INTERVAL n DAY. Use only the exact live schema.
+Do not use LIMIT for aggregate queries.
 
 LIVE SCHEMA:
-{chr(10).join(schema_parts)}
+{schema_text}
 
 USER QUESTION:
 {question}
@@ -3117,104 +3214,50 @@ FAILED SQL:
 {sql}
 
 EXASOL ERROR:
-{str(first_sql_error)[:2000]}
+{str(first_error)[:1800]}
 """
-            correction_response = requests.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "You repair Exasol SQL using supplied live schema metadata. "
-                                "Never invent identifiers. Return SQL only."
-                            ),
-                        },
-                        {"role": "user", "content": correction_prompt},
-                    ],
-                    "stream": False,
-                    "options": {"temperature": 0},
-                },
-                timeout=OLLAMA_TIMEOUT_SECONDS,
-            )
-            correction_response.raise_for_status()
-            sql = correction_response.json().get("message", {}).get("content", "").strip()
-            sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.I)
-            sql = re.sub(r"\s*```$", "", sql).strip()
+                corrected_raw = _ollama_request([
+                    {"role": "system", "content": EXASOL_RAG_SQL_RULES},
+                    {"role": "user", "content": correction_prompt},
+                ])
+                corrected_sql = _validate_rag_sql(
+                    corrected_raw, allowed_tables, allowed_columns
+                )
+                try:
+                    rows = query_rows(connection, corrected_sql)
+                    sql = corrected_sql
+                except Exception as second_error:
+                    app.logger.exception("Corrected Exasol SQL also failed")
+                    return jsonify({
+                        "success": False,
+                        "error": "Ollama could not generate executable Exasol SQL after one correction.",
+                        "details": str(second_error)[:1500],
+                        "generated_sql": corrected_sql,
+                    }), 422
 
-            if not re.match(r"^(SELECT|WITH)\b", sql, re.I):
-                raise ValueError("Ollama correction was not a read-only SELECT query.")
-
-            if any(token in sql for token in (";", "--", "/*", "*/")):
-                raise ValueError("Ollama correction contained a semicolon or SQL comment.")
-
-            if forbidden.search(sql):
-                raise ValueError("Unsafe SQL operation rejected after Ollama correction.")
-
-            corrected_matches = list(table_pattern.finditer(sql))
-            if not corrected_matches:
-                raise ValueError("No approved table found in corrected SQL.")
-
-            for match in corrected_matches:
-                schema_name, table_name = match.groups()
-                if schema_name and schema_name.upper() != EXASOL_SCHEMA:
-                    raise ValueError(
-                        f"Access to schema '{schema_name}' is forbidden. "
-                        f"Allowed schema: {EXASOL_SCHEMA}"
-                    )
-                if table_name.upper() not in allowed_tables:
-                    raise ValueError(
-                        f"Table '{table_name}' is not available "
-                        f"in schema '{EXASOL_SCHEMA}'."
-                    )
-
-            if not re.search(r"\bLIMIT\s+\d+\b", sql, re.I):
-                sql += " LIMIT 100"
-
-            # Execute the corrected query once. If it still fails, report it.
-            rows = query_rows(connection, sql)
-
-        connection.close()
-        connection = None
-
-        # 5. Generate an answer from actual retrieved data
-        answer_prompt = f"""
-Answer the user's question using only the database results.
-
-Question:
-{question}
-
-Executed SQL:
-{sql}
-
-Database results:
-{json.dumps(rows, default=str)}
-
-Rules:
-- Never invent values or records.
-- If results are empty, say no matching records were found.
-- Explain the results clearly and concisely.
+        # Build the response from actual rows. Ollama is optional for this final
+        # explanation: if it is unavailable, still return the real query result.
+        answer = None
+        try:
+            answer_prompt = f"""
+Answer the user's question using only these actual Exasol results.
+Never invent numbers. If the result contains FAILED_PIPELINE_COUNT, state that count.
+Question: {question}
+Executed SQL: {sql}
+Database results: {json.dumps(rows, default=str)}
+Answer in concise plain English.
 """
-
-        response = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": answer_prompt
-                    }
-                ],
-                "stream": False,
-                "options": {"temperature": 0}
-            },
-            timeout=180
-        )
-        response.raise_for_status()
-
-        answer = response.json()["message"]["content"]
+            answer = _ollama_request([
+                {"role": "system", "content":
+                 "You are OpsNexus AI. Ground every factual statement in supplied database results."},
+                {"role": "user", "content": answer_prompt},
+            ])
+        except RuntimeError as exc:
+            app.logger.warning("Ollama answer generation unavailable; using database-backed fallback: %s", exc)
+            if rows and "failed_pipeline_count" in rows[0]:
+                answer = f"There were {rows[0]['failed_pipeline_count']} failed pipeline runs in the selected date range."
+            else:
+                answer = f"Query completed successfully and returned {len(rows)} row(s)."
 
         return jsonify({
             "success": True,
@@ -3223,25 +3266,35 @@ Rules:
             "row_count": len(rows),
             "data": rows,
             "answer": answer,
-            "model": OLLAMA_MODEL
+            "model": OLLAMA_MODEL,
+            "schema": EXASOL_SCHEMA,
         }), 200
 
     except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except RuntimeError as exc:
+        app.logger.exception("RAG dependency/configuration error")
         return jsonify({
             "success": False,
-            "error": str(exc)
-        }), 400
-
-    except Exception:
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }), 503
+    except Exception as exc:
         app.logger.exception("RAG API failed")
         return jsonify({
             "success": False,
-            "error": "RAG request failed. Check Flask logs."
+            "error": "RAG request failed.",
+            "details": str(exc)[:1500],
+            "error_type": type(exc).__name__,
         }), 500
-
     finally:
-        if connection:
-            connection.close()
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                app.logger.warning("Failed to close Exasol connection cleanly", exc_info=True)
+
+
 # ============================================================
 # DATA REQUESTS — EXASOL + OLLAMA
 # Place this section AFTER the existing database helper functions

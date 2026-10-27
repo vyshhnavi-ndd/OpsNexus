@@ -224,7 +224,7 @@ function ChartTooltip({ active, payload, label }) {
 }
 
 export default function UsageBillingDashboard() {
-  const [days, setDays] = useState(30);
+  const [days, setDays] = useState(7);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -278,8 +278,8 @@ export default function UsageBillingDashboard() {
       } else {
         setError(
           err.response?.data?.error ||
-            err.message ||
-            "Unable to load billing data."
+          err.message ||
+          "Unable to load billing data."
         );
       }
     } finally {
@@ -490,157 +490,6 @@ export default function UsageBillingDashboard() {
             />
           </div>
 
-          {/* Main chart */}
-          <article className="usage-panel">
-            <div className="usage-panel-heading">
-              <h3>Daily cost vs pipeline activity</h3>
-              <p>
-                Bars represent recorded daily cost. The line represents
-                pipeline run counts on the right axis.
-              </p>
-            </div>
-
-            <div
-              className="usage-chart"
-              style={{
-                width: "100%",
-                height: 350,
-                minWidth: 0,
-                position: "relative",
-              }}
-            >
-              {hasChartData ? (
-                <ResponsiveContainer
-                  width="100%"
-                  height="100%"
-                  minWidth={0}
-                  minHeight={0}
-                >
-                  <ComposedChart
-                    data={chartData}
-                    margin={{
-                      top: 16,
-                      right: 18,
-                      left: 12,
-                      bottom: 8,
-                    }}
-                  >
-                    <CartesianGrid
-                      stroke="#e2e8f0"
-                      strokeDasharray="4 4"
-                      vertical={false}
-                    />
-
-                    <XAxis
-                      dataKey="chartDate"
-                      tick={{ fontSize: 11, fill: "#64748b" }}
-                      tickLine={false}
-                      axisLine={{ stroke: "#cbd5e1" }}
-                      minTickGap={18}
-                    />
-
-                    <YAxis
-                      yAxisId="cost"
-                      orientation="left"
-                      tick={{ fontSize: 11, fill: "#64748b" }}
-                      tickLine={false}
-                      axisLine={false}
-                      width={76}
-                      domain={[0, "auto"]}
-                      tickFormatter={(value) =>
-                        `₹${Number(value).toLocaleString("en-IN")}`
-                      }
-                    />
-
-                    <YAxis
-                      yAxisId="runs"
-                      orientation="right"
-                      allowDecimals={false}
-                      tick={{ fontSize: 11, fill: "#64748b" }}
-                      tickLine={false}
-                      axisLine={false}
-                      width={42}
-                      domain={[0, "auto"]}
-                    />
-
-                    <Tooltip
-                      content={<ChartTooltip />}
-                      cursor={{
-                        fill: "#94a3b8",
-                        fillOpacity: 0.08,
-                      }}
-                    />
-
-                    <Legend verticalAlign="top" height={36} />
-
-                    {hasCostData && (
-                      <Bar
-                        yAxisId="cost"
-                        dataKey="cost_inr"
-                        name="Cost (INR)"
-                        fill="#6478f5"
-                        radius={[5, 5, 0, 0]}
-                        maxBarSize={30}
-                        isAnimationActive={false}
-                        connectNulls={false}
-                      />
-                    )}
-
-                    {hasPipelineData && (
-                      <Line
-                        yAxisId="runs"
-                        type="monotone"
-                        dataKey="pipeline_runs"
-                        name="Pipeline runs"
-                        stroke="#10a37f"
-                        strokeWidth={2.5}
-                        connectNulls={false}
-                        dot={{ r: 3, fill: "#10a37f" }}
-                        activeDot={{ r: 6 }}
-                        isAnimationActive={false}
-                      />
-                    )}
-                  </ComposedChart>
-                </ResponsiveContainer>
-              ) : (
-                <div
-                  className="usage-chart-empty"
-                  style={{
-                    height: "100%",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    textAlign: "center",
-                    padding: 24,
-                  }}
-                >
-                  {daily.length === 0
-                    ? "No daily records were returned by the API."
-                    : "No valid numeric cost or pipeline run values are available."}
-                </div>
-              )}
-            </div>
-
-            {!hasCostData && (
-              <p className="usage-footnote">
-                No numeric daily cost values are available for this period.
-                The chart does not assume missing costs are zero.
-              </p>
-            )}
-
-            {!hasPipelineData && (
-              <p className="usage-footnote">
-                Pipeline run data is unavailable for the chart.
-              </p>
-            )}
-
-            <p className="usage-footnote">
-              Period: {period.from || "Unknown"} to {period.to || "Unknown"}
-              {period.days_requested
-                ? ` (${period.days_requested} days requested)`
-                : ""}
-            </p>
-          </article>
 
           {/* Daily records table */}
           <article className="usage-panel">
@@ -652,62 +501,62 @@ export default function UsageBillingDashboard() {
             </div>
 
             <div
-              className="usage-table-wrap"
+              className="table-container"
               style={{ overflowX: "auto" }}
             >
-              <table className="usage-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Cost</th>
-                    <th>Cost status</th>
-                    <th>Usage status</th>
-                    <th>Runs</th>
-                    <th>Succeeded</th>
-                    <th>Failed</th>
-                    <th>Cost reason</th>
-                    <th>Usage reason</th>
-                  </tr>
-                </thead>
+                <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Cost</th>
+                        <th>Cost status</th>
+                        <th>Usage status</th>
+                        <th>Runs</th>
+                        <th>Succeeded</th>
+                        <th>Failed</th>
+                        <th>Cost reason</th>
+                        <th>Usage reason</th>
+                      </tr>
+                    </thead>
 
-                <tbody>
-                  {daily.length > 0 ? (
-                    daily
-                      .slice()
-                      .reverse()
-                      .map((row, index) => (
-                        <tr key={row.date || `row-${index}`}>
-                          <td>{row.date}</td>
-                          <td>{money(row.cost_inr)}</td>
-                          <td>
-                            <Status value={row.cost_level} />
-                          </td>
-                          <td>
-                            <Status value={row.usage_level} />
-                          </td>
-                          <td>{formatNumber(row.pipeline_runs)}</td>
-                          <td>{formatNumber(row.succeeded)}</td>
-                          <td>{formatNumber(row.failed)}</td>
-                          <td>
-                            {row.cost_reason ||
-                              "No explanation available."}
-                          </td>
-                          <td>
-                            {row.usage_reason ||
-                              "No explanation available."}
+                    <tbody>
+                      {daily.length > 0 ? (
+                        daily
+                          .slice()
+                          .reverse()
+                          .map((row, index) => (
+                            <tr key={row.date || `row-${index}`}>
+                              <td>{row.date}</td>
+                              <td>{money(row.cost_inr)}</td>
+                              <td>
+                                <Status value={row.cost_level} />
+                              </td>
+                              <td>
+                                <Status value={row.usage_level} />
+                              </td>
+                              <td>{formatNumber(row.pipeline_runs)}</td>
+                              <td>{formatNumber(row.succeeded)}</td>
+                              <td>{formatNumber(row.failed)}</td>
+                              <td>
+                                {row.cost_reason ||
+                                  "No explanation available."}
+                              </td>
+                              <td>
+                                {row.usage_reason ||
+                                  "No explanation available."}
+                              </td>
+                            </tr>
+                          ))
+                      ) : (
+                        <tr>
+                          <td colSpan={9}>
+                            No daily records are available for this period.
                           </td>
                         </tr>
-                      ))
-                  ) : (
-                    <tr>
-                      <td colSpan={9}>
-                        No daily records are available for this period.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                      )}
+                    </tbody>
+                  </table>
+              </div>
           </article>
 
           {/* Anomaly and assessment explanations */}
