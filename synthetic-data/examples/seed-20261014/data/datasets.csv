@@ -1,0 +1,4 @@
+dataset_id,dataset_name,domain,source_id,schema_version
+ds_orders,orders_daily,commerce,src_synthetic_erp,2.0.0
+ds_inventory,inventory_daily,supply,src_synthetic_erp,2.0.0
+ds_finance,finance_daily,finance,src_synthetic_ledger,2.0.0

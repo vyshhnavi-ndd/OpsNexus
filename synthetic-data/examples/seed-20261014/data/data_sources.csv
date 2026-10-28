@@ -1,0 +1,4 @@
+source_id,source_name,source_type,classification,schema_version
+src_synthetic_erp,Synthetic ERP,SYNTHETIC,SYNTHETIC_DEMO,2.0.0
+src_synthetic_ledger,Synthetic Ledger,SYNTHETIC,SYNTHETIC_DEMO,2.0.0
+src_synthetic_warehouse,Synthetic Warehouse,SYNTHETIC,SYNTHETIC_DEMO,2.0.0
