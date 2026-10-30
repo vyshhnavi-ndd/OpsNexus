@@ -2,6 +2,8 @@
 
 # OpsNexus
 
+**DEMO VIDEO - https://drive.google.com/file/d/1BYMxySBkBfhqHhfkoVvBANoyZJWYRzjY/view?usp=sharing**
+
 ### Data Pipeline Observability · Data Quality Intelligence · AI-Assisted Data Operations
 
 **A unified operations dashboard connecting Azure Data Factory, Exasol, and modern analytics workflows.**
