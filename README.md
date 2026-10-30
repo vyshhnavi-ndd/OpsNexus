@@ -269,25 +269,69 @@ cost-usage table, so cost metrics may report unavailable.
 
 `exasol-dashboard/` is a separate Vite application. Its intelligence screen
 uses the curated findings API at port `5001`; its legacy ADF/staging panels use
-the separate `backend/` service at port `5000`. Start the findings API from
-the repository root:
+the separate `backend/` service at port `5000`. Start three services in
+separate PowerShell terminals.
 
-```powershell
-& '.\synthetic-data\.venv\Scripts\python.exe' -m flask --app api.app run --host 127.0.0.1 --port 5001
-```
+1. Create `backend/.env` locally. Use an authorized non-SYS Exasol account,
+   keep secrets out of Git, and leave certificate validation enabled:
 
-Then, in another terminal:
+   ```dotenv
+   EXASOL_HOST=127.0.0.1
+   EXASOL_PORT=8563
+   EXASOL_USER=<approved-non-SYS-user>
+   EXASOL_PASSWORD=<secret-from-approved-store>
+   EXASOL_SCHEMA=OPS_STAGE
+   EXASOL_NOCERTCHECK=false
+   FLASK_HOST=127.0.0.1
+   FLASK_PORT=5000
+   FRONTEND_URL=http://localhost:5173
+   AZURE_TENANT_ID=<tenant-id-if-needed>
+   AZURE_CLIENT_ID=<service-principal-client-id-if-needed>
+   AZURE_CLIENT_SECRET=<secret-from-approved-store>
+   AZURE_SUBSCRIPTION_ID=<subscription-id-if-needed>
+   AZURE_RESOURCE_GROUP=opsnexus
+   AZURE_DATA_FACTORY=opsnexus
+   AZURE_MONTHLY_BUDGET_INR=1000
+   COST_NORMAL_MAX_INR=10
+   COST_ELEVATED_MAX_INR=50
+   NORMAL_RUNS_MAX=5
+   ELEVATED_RUNS_MAX=20
+   ```
 
-```powershell
-Set-Location .\exasol-dashboard
-npm install
-npm run dev
-```
+   Azure settings are optional unless using Azure features. The budget and
+   run-count settings are application thresholds, not credentials. The legacy
+   backend reads `backend/.env`; the findings API uses a separate `api/.env`
+   and separate identity. Do not copy credentials between them.
 
-Open <http://127.0.0.1:5173/>. The legacy backend needs its own approved,
-non-SYS Exasol identity and validated TLS for Exasol features. Do not copy
-credentials between `backend/.env` and `api/.env`; do not use `SYS` or disable
-certificate validation to work around missing permissions.
+2. Install and start the legacy backend from the repository root. The
+   dependency file is named `backend/requirement.txt` (singular):
+
+   ```powershell
+   py -m venv .\backend\.venv
+   & '.\backend\.venv\Scripts\python.exe' -m pip install --upgrade pip
+   & '.\backend\.venv\Scripts\python.exe' -m pip install -r .\backend\requirement.txt
+   & '.\backend\.venv\Scripts\python.exe' .\backend\app.py
+   ```
+
+3. In another terminal, start the read-only findings API from the repository
+   root. Configure `api/.env` as described in the integrated quick start:
+
+   ```powershell
+   & '.\synthetic-data\.venv\Scripts\python.exe' -m flask --app api.app run --host 127.0.0.1 --port 5001
+   ```
+
+4. In a third terminal, start the dashboard:
+
+   ```powershell
+   Set-Location .\exasol-dashboard
+   npm install
+   npm run dev
+   ```
+
+Open <http://127.0.0.1:5173/>. The Intelligence Findings screen uses port
+`5001`; staging and ADF panels use port `5000`. The legacy backend requires
+authorized access to its configured `OPS_STAGE` tables. Do not use `SYS` or
+disable certificate validation to work around missing permissions.
 
 ## Tests and verification
 
@@ -335,9 +379,10 @@ read-only API connection and configured local environment.
 | `infra/exasol/tests/` | Offline Exasol contract tests and live evaluator |
 | `synthetic-data/` | Deterministic bundle generator, validator, examples, and tests |
 | `contracts/` | Shared dashboard API contract |
-| `docs/` | Consolidated documentation overview and retained PDF references |
+| `docs/` | Consolidated overview, local run guide, and retained PDF references |
 
 This README is the project entry point. The [docs overview](docs/README.md)
 consolidates setup, API, Exasol, synthetic-data, and integration guidance.
-Use the code, SQL, and shared contracts listed there as the implementation
-source of truth.
+See [the local run guide](docs/how%20to%20run.txt) for step-by-step startup
+instructions. Use the code, SQL, and shared contracts listed there as the
+implementation source of truth.

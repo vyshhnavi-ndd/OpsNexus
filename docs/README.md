@@ -6,8 +6,9 @@ API and dashboard contracts, Exasol setup, synthetic-data schema, intelligence
 rules, ADF handoff, and validation status.
 
 The PDF documents in this folder are retained as supplementary project
-references. For source-of-truth implementation details, use the code and
-contracts identified below.
+references. See [`how to run.txt`](how%20to%20run.txt) for step-by-step local
+startup instructions. For source-of-truth implementation details, use the
+code and contracts identified below.
 
 ## Project and implementation status
 
