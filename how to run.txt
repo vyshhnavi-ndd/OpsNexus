@@ -1,0 +1,221 @@
+OpsNexus — Local Setup and Run Guide
+====================================
+
+Choose ONE run mode below:
+
+1. Integrated application (recommended): the maintained frontend and findings
+   API are served together by Flask on port 5000.
+2. Separate supplied dashboard (optional): exasol-dashboard/ runs in Vite on
+   port 5173 and uses the legacy backend plus the findings API.
+
+Run commands from the repository root unless a step says to change folders.
+For this checkout, the repository root is D:\OpsNexus\OpsNexus.
+
+SECURITY
+--------
+
+- Do not use Exasol SYS for an application or API login. Configure an
+  authorized, least-privilege, non-SYS account.
+- Keep Exasol and Azure credentials only in ignored local .env files or an
+  approved secret store. Never add real credentials to this guide, Git,
+  screenshots, or shared documents.
+- Keep TLS certificate validation enabled. Do not set
+  EXASOL_NOCERTCHECK=true.
+- The Flask development servers have no built-in authentication. Bind them to
+  127.0.0.1 and do not expose them to a network.
+- The repository does not provision Azure resources or ADF pipelines.
+
+Prerequisites
+-------------
+
+- Windows PowerShell
+- Python 3.11 or later for the synthetic-data virtual environment
+- Node.js and npm
+- The existing local Exasol Personal deployment for live database features
+- Optional: Ollama and a locally installed model for the integrated assistant
+
+
+MODE 1 — INTEGRATED APPLICATION (RECOMMENDED)
+=============================================
+
+1. Prepare Python
+
+From the repository root, create the virtual environment only if it does not
+already exist, then install the local package and API dependencies:
+
+    py -3.11 -m venv .\synthetic-data\.venv
+    & '.\synthetic-data\.venv\Scripts\python.exe' -m pip install -e .\synthetic-data
+    & '.\synthetic-data\.venv\Scripts\python.exe' -m pip install -r .\api\requirements.txt
+
+2. Start Exasol and configure the API
+
+Start the existing Exasol Personal deployment if needed:
+
+    & '.\Deployment\exasol.exe' start
+
+Confirm the current host, port, and TLS details using the supported launcher
+or an approved database client.
+
+Copy api\.env.example to api\.env and fill in the values locally. The API
+requires a dedicated read-only, non-SYS user with access to
+OPS_INTEL.V_FINDINGS, encryption, and certificate validation. For a local
+self-signed certificate, use the SHA-256 certificate fingerprint setting
+documented in api\.env.example; otherwise configure CA validation.
+
+The API's Exasol identity should have only CREATE SESSION, USAGE on
+OPS_INTEL, and SELECT on OPS_INTEL.V_FINDINGS. An authorized administrator
+can apply the grants from infra\exasol\sql\04_grant_findings_api_readonly.sql
+after the user and view exist. Do not grant the API identity access to raw
+staging tables.
+
+3. Build the dashboard (after frontend changes)
+
+    Set-Location .\frontend
+    npm install
+    npm run build
+    Set-Location ..
+
+The built dashboard is served from api\static\. For frontend hot reload,
+instead run "npm run dev" from frontend\ while Flask is running; Vite proxies
+/api and /health to port 5000.
+
+4. Start Flask
+
+From the repository root:
+
+    & '.\synthetic-data\.venv\Scripts\python.exe' -m flask --app api.app run --host 127.0.0.1 --port 5000
+
+Open:
+
+    http://127.0.0.1:5000/
+
+The integrated assistant is optional. Configure OLLAMA_URL to a loopback
+Ollama endpoint and OLLAMA_MODEL to a model installed locally in api\.env.
+The assistant retrieves only curated finding evidence; it does not generate
+or execute SQL.
+
+The integrated service provides the findings dashboard and API. Data Requests
+are stored in local SQLite and do not write to Exasol. Missing database or
+model services are reported as unavailable; they are not replaced with
+fabricated values.
+
+
+MODE 2 — SEPARATE SUPPLIED DASHBOARD (OPTIONAL)
+===============================================
+
+This mode uses exasol-dashboard\ for the UI, backend\ for its legacy staging
+and ADF panels, and api\app.py for the curated intelligence findings screen.
+These are separate services with separate environment files and identities.
+
+1. Configure backend\.env
+
+Create backend\.env locally. Replace every placeholder with an appropriate
+local value; do not commit the file. The legacy backend reads the variable
+names below. Use an approved non-SYS Exasol account and validated TLS.
+
+    EXASOL_HOST=127.0.0.1
+    EXASOL_PORT=8563
+    EXASOL_USER=<approved-non-SYS-user>
+    EXASOL_PASSWORD=<secret-from-approved-store>
+    EXASOL_SCHEMA=OPS_STAGE
+    EXASOL_NOCERTCHECK=false
+    FLASK_HOST=127.0.0.1
+    FLASK_PORT=5000
+    FRONTEND_URL=http://localhost:5173
+    AZURE_TENANT_ID=<tenant-id-if-Azure-features-are-used>
+    AZURE_CLIENT_ID=<service-principal-client-id-if-used>
+    AZURE_CLIENT_SECRET=<secret-from-approved-store>
+    AZURE_SUBSCRIPTION_ID=<subscription-id-if-Azure-features-are-used>
+    AZURE_RESOURCE_GROUP=opsnexus
+    AZURE_DATA_FACTORY=opsnexus
+    AZURE_MONTHLY_BUDGET_INR=1000
+    COST_NORMAL_MAX_INR=10
+    COST_ELEVATED_MAX_INR=50
+    NORMAL_RUNS_MAX=5
+    ELEVATED_RUNS_MAX=20
+
+The budget and run-count values are application thresholds, not Azure
+credentials. Set them to values appropriate for your environment. Azure
+features require a configured service principal and appropriate Azure
+permissions; a service principal is not automatic sign-in as your interactive
+Azure user.
+
+EXASOL_NOCERTCHECK must remain false. If the local database certificate
+cannot be validated, configure an appropriate trusted certificate rather
+than disabling validation. The legacy backend and the maintained API use
+different environment-variable names and credentials; do not copy api\.env
+into backend\ or vice versa.
+
+The currently named dependency file is backend\requirement.txt (singular).
+Install its dependencies using the virtual environment's Python directly:
+
+    py -m venv .\backend\.venv
+    & '.\backend\.venv\Scripts\python.exe' -m pip install --upgrade pip
+    & '.\backend\.venv\Scripts\python.exe' -m pip install -r .\backend\requirement.txt
+
+Using the virtual environment Python directly avoids needing to activate it
+in PowerShell.
+
+2. Start the legacy backend
+
+Open a separate PowerShell terminal at the repository root:
+
+    & '.\backend\.venv\Scripts\python.exe' .\backend\app.py
+
+The backend listens on 127.0.0.1:5000 by default. Confirm the startup output
+and health endpoint before using the dashboard. Exasol routes require an
+authorized non-SYS identity, access to the intended OPS_STAGE tables, and
+validated TLS. Do not use the API-only OPSNEXUS_API identity as a staging
+identity unless its grants explicitly support that separate purpose.
+
+3. Start the findings API
+
+In another terminal at the repository root, configure api\.env as described
+in Mode 1 and start the read-only findings API on port 5001:
+
+    & '.\synthetic-data\.venv\Scripts\python.exe' -m flask --app api.app run --host 127.0.0.1 --port 5001
+
+4. Start the dashboard
+
+In another terminal:
+
+    Set-Location .\exasol-dashboard
+    npm install
+    npm run dev
+
+Open the Vite URL shown in the terminal (normally
+http://127.0.0.1:5173/). The Intelligence Findings screen uses the API at
+port 5001. Staging and ADF panels use the legacy backend at port 5000.
+
+Run the frontend, legacy backend, and findings API in separate terminals.
+Do not run "cd exasol-dashboard" a second time if the terminal is already in
+that folder.
+
+
+TROUBLESHOOTING AND VALIDATION
+==============================
+
+- If the UI loads but findings are unavailable, check the findings API
+  terminal, api\.env, Exasol reachability, certificate validation, and the
+  read-only user's grants.
+- If legacy staging panels are unavailable, check backend\.env, the backend
+  terminal, and the legacy account's authorized OPS_STAGE access.
+- A zero-row metadata result may mean the connected user cannot see a table;
+  it does not prove that the table or its data is missing.
+- Do not use SYS or disable TLS verification to work around an authorization
+  or certificate error.
+- To test the integrated API from PowerShell:
+
+    Invoke-RestMethod http://127.0.0.1:5000/health
+    Invoke-RestMethod 'http://127.0.0.1:5000/api/findings?page=1&page_size=10'
+
+- To run the local API and synthetic-data tests from the repository root:
+
+    $env:PYTHONPATH = 'D:\OpsNexus\OpsNexus'
+    & '.\synthetic-data\.venv\Scripts\python.exe' -m unittest discover -s .\synthetic-data\tests -p 'test_*.py' -v
+    & '.\synthetic-data\.venv\Scripts\python.exe' -m unittest discover -s .\infra\exasol\tests -p 'test_*.py' -v
+    & '.\synthetic-data\.venv\Scripts\python.exe' -m unittest discover -s .\api\tests -p 'test_*.py' -v
+
+Automated API and Exasol contract tests do not require a live Exasol database.
+The live findings evaluator does require the configured read-only API identity
+and a reachable OPS_INTEL.V_FINDINGS view.
