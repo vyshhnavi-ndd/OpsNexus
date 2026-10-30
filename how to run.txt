@@ -30,7 +30,3 @@ Azure configuration note
 
 The supplied legacy backend uses a service principal configured through local environment variables. That is not automatic sign-in with the interactive Azure user. Keep the secret out of source control and use least-privilege Azure roles. ADF pipeline artifacts and Power BI assets still need to be supplied/verified by their owner.
 
-Project context
-
-Backend discussion: https://chatgpt.com/share/6ad64c17-b1ec-83ec-8003-cfb53d8451b8
-Architecture discussion: https://chatgpt.com/share/6ad64c69-6974-83e8-84c0-522b5232d2e5
